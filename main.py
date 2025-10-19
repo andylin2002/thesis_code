@@ -1,21 +1,17 @@
-# main.py
-
 import utils
 import numpy as np
 
-ENV_CONFIG_PATH = 'config/env_config.yaml'
-SYS_CONFIG_PATH = 'config/system_config.yaml'
+CONFIG_PATH = 'config.yaml'
 
 def main():
 ##### --- Loading Environment & System Configuration ---
-    env_config = utils.load_yaml_config(ENV_CONFIG_PATH)
-    sys_config = utils.load_yaml_config(SYS_CONFIG_PATH)
-    if not (env_config and sys_config):
+    config = utils.load_yaml_config(CONFIG_PATH)
+    if not (config):
         print("Configuration loading failed.")
         return
 
 ##### --- Reference Point Setup ---
-    reference_grid, x_bounds, y_bounds, ap_locations = utils.generate_reference_grid(env_config)
+    reference_grid, x_bounds, y_bounds, ap_locations = utils.generate_reference_grid(config)
 
 ##### --- Importing Raw CSI Data ---
     RAW_CSI_PATH = 'csi_sample.npy'
@@ -30,8 +26,7 @@ def main():
 
     feature_matrix = run_csi_analysis(
         raw_csi_data=raw_csi_data,
-        env_config=env_config,
-        sys_config=sys_config
+        config=config
     )
 
 ##### --- Starting Indoor Location Stage ---
@@ -40,11 +35,10 @@ def main():
     predicted_path = run_indoor_location(
     feature_matrix=feature_matrix, 
     reference_grid=reference_grid, 
-    env_config=env_config,
-    sys_config=sys_config
+    config=config
     )
 
-    print(predicted_path)
+    print(predicted_path[0:10])
 
 if __name__ == '__main__':
     main()

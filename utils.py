@@ -135,9 +135,9 @@ def load_raw_csi(path):
     try:
         complex_csi = np.load(path)
         
-        if complex_csi.shape != (3, 30, 1500) or complex_csi.dtype != np.complex64:
+        if complex_csi.shape != (4, 3, 30, 1500) or complex_csi.dtype != np.complex64:
             print(f"Error: Data shape or dtype mismatch in {path}.")
-            print(f"Expected (3, 30, 1500) and complex64, got {complex_csi.shape} and {complex_csi.dtype}.")
+            print(f"Expected (4, 3, 30, 1500) and complex64, got {complex_csi.shape} and {complex_csi.dtype}.")
             return None
             
         return complex_csi

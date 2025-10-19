@@ -1,1 +1,1 @@
-from .indoor_location import run_indoor_location
+from .indoor_location_coordinator import run_indoor_location

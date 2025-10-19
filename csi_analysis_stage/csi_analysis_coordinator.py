@@ -1,25 +1,28 @@
 import numpy as np
 from typing import Dict, Any, Optional
 
-
+from .data_processor import run_data_processor
+from .feature_extractor import run_feature_extractor
 
 def run_csi_analysis(
         raw_csi_data: np.ndarray, 
-        env_config: Dict[str, Any], 
-        sys_config: Dict[str, Any]
+        config: Dict[str, Any]
 ) -> Optional[np.ndarray]:
-    
-##### --- Load Static Parameters ---
-    ap_data = env_config.get('ACCESS_POINTS', {})
-    num_ap = len(ap_data)
-    num_sample = sys_config['NUM_SAMPLE']
-    feature_matrix = np.zeros((num_sample, num_ap, 3), dtype=np.float32) # 3 means power, angle, delay
 
 ##### --- Data Preprocessing ---
 
+    ## 希望所有AP用GPU同時計算
 
+    processed_csi = run_data_processor(
+        raw_csi_data=raw_csi_data,
+        config=config)
 
 ##### --- Feature Extraction ---
+
+    feature_matrix = run_feature_extractor(
+        processed_csi=processed_csi,
+        config=config
+    )
 
     return feature_matrix
     

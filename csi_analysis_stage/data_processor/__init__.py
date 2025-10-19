@@ -1,0 +1,1 @@
+from .data_processor_coordinator import run_data_processor
