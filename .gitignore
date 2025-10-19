@@ -29,6 +29,9 @@ env/
 # Logs
 *.log
 
+# macOS
+.DS_Store
+
 # IDE files
 .vscode/
 .idea/
