@@ -11,8 +11,6 @@ def run_csi_analysis(
 
 ##### --- Data Preprocessing ---
 
-    ## 希望所有AP用GPU同時計算
-
     processed_csi = run_data_processor(
         raw_csi_data=raw_csi_data,
         config=config)
