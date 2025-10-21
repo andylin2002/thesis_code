@@ -40,8 +40,8 @@ CSI_DIMENSIONS:
   NUM_SUBCARRIERS: 30                     # notation: M
   
 # --- Frequency & Inter-element Spacing ---
-CARRIER_FREQUENCY_GHZ: 5.0 * 1000000000 
-CHANNEL_BANDWIDTH_MHZ: 80.0 * 1000000     # notation: B
+CARRIER_FREQUENCY_HZ: 5.0 * 1000000000 
+CHANNEL_BANDWIDTH_HZ: 80.0 * 1000000      # notation: B
 ANTENNAS_DISTENCE: 0.03                   # notation: d
 
 # --- Packeting & Aggregation ---

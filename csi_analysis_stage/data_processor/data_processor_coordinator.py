@@ -41,9 +41,9 @@ def run_data_processor(
 
     # input: (QT, 1, N, M)
     reshape_aggregated_csi_gpu = aggregated_csi_gpu.reshape(
-        num_sample, 
-        num_ap, 
-        1, 
+        num_sample,
+        num_ap,
+        1,
         *aggregated_csi_gpu.shape[2:]
     ) # output: (T, Q, 1, N, M)
 

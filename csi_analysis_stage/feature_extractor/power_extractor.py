@@ -1,5 +1,3 @@
-# csi_analysis_stage/feature_extractor/power_extractor.py
-
 import torch
 from typing import Optional
 
