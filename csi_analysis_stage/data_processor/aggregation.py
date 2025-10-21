@@ -10,10 +10,10 @@ def run_aggregation_gpu(non_aggregated_csi_gpu: torch.Tensor) -> Optional[torch.
 
 ##### --- Reshape ---
     combined_tensor = non_aggregated_csi_gpu.view(B_batch, P_packet, N_antenna * M_subcarrier)
-    svd_input_batch = combined_tensor.permute(0, 2, 1).contiguous()
+    batch_svd_input = combined_tensor.permute(0, 2, 1).contiguous()
 
 ##### --- SVD decomposition ---
-    U, S, Vh = torch.linalg.svd(svd_input_batch)
+    U, S, Vh = torch.linalg.svd(batch_svd_input)
     first_singular_vector = U[:, :, 0]
     max_singular_value = S[:, 0]
 

@@ -22,14 +22,14 @@ def run_feature_extractor(
     
 ##### --- Power ---
     power_tensor_flat = power_extractor.extract_power_batch(
-        batch_input_csi=batch_input_csi
+        input_csi=batch_input_csi
     )
 
 ##### --- MMP algorithm (AoA & ToF) ---
     mmp_engine = MMP_Algorithm(config=config)
 
     angle_tensor_flat, tof_tensor_list = mmp_engine.estimate_aoa_tof_batch(
-        batch_input_csi=batch_input_csi
+        input_csi=batch_input_csi
     )
 
 ##### --- Delay ---

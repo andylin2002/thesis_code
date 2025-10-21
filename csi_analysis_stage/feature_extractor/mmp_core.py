@@ -24,22 +24,22 @@ class MMP_Algorithm:
 
     def estimate_aoa_tof_batch(
         self, 
-        batch_input_csi: torch.Tensor, # (QT, N, M)
+        input_csi: torch.Tensor, # (QT, N, M)
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         
     ##### --- Construct CSI Enhance Matrix ---
         
-        batch_input_csi_enhance = self._construct_enhance_matrix(batch_input_csi)
+        input_csi_enhance = self._construct_enhance_matrix(input_csi)
 
     ##### --- Find partition the Unitary Matrix U of the left singular values ---
 
-        Us_left_singular_vectors, L_rank = 0 #(TODO) 不用函式直接算
+        Us_left_singular_vectors, L_multipath = self._get_left_singular_vectors(input_csi_enhance)
 
     ##### --- ToF ---
-        tof_tensor_list, eigenvector_matrix = self._estimate_tof_logic(Us_left_singular_vectors, L_rank) 
+        tof_tensor_list, eigenvector_matrix = self._estimate_tof_logic(Us_left_singular_vectors, L_multipath) 
         
     ##### --- AoA ---
-        aoa_tensor_flat = self._estimate_aoa_logic(Us_left_singular_vectors, L_rank, eigenvector_matrix) 
+        aoa_tensor_flat = self._estimate_aoa_logic(Us_left_singular_vectors, L_multipath, eigenvector_matrix) 
 
         print(f"      [MMP Core] AoA Output Shape: {aoa_tensor_flat.shape}")
         print(f"      [MMP Core] ToF Output Type: List[Tensor] (Length {len(tof_tensor_list)})")
@@ -69,12 +69,48 @@ class MMP_Algorithm:
 
     # --- 公開批次處理方法 (供 Coordinator 呼叫) ---
 
-    def _construct_enhance_matrix(self, batch_input_csi: torch.Tensor) -> torch.Tensor:
+    def _construct_enhance_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
 
-        pass
+        B_batch, N_antenna, M_subcarrier = matrix.shape
+        alpha = self.alpha
+        beta = self.beta
+
+        hankel_list: List[torch.Tensor] = []
+        
+        C1 = self._construct_hankel_matrix(matrix[:, 0, :], alpha, beta)
+        C2 = self._construct_hankel_matrix(matrix[:, 1, :], alpha, beta)
+        C3 = self._construct_hankel_matrix(matrix[:, 2, :], alpha, beta)
+
+        enhance_matrix = torch.block([
+            [C1, C2],
+            [C2, C3]
+        ])
+
+        return enhance_matrix
     
-    def _construct_hankel_matrix(self, csi_vector: torch.Tensor, alpha: int, beta: int) -> torch.Tensor:
+    def _construct_hankel_matrix(self, vector: torch.Tensor, row: int, col: int) -> torch.Tensor:
 
-        pass
+        # 'unfold' function needs the dimension
+        vector_unfoldable = vector.unsqueeze(1) # (QT, 1, M)
+        hankel_unfolded = vector_unfoldable.unfold(2, row, 1) # (QT, 1, row, col)
+        hankel_matrix = hankel_unfolded.squeeze(1).contiguous() # (QT, row, col)
 
+        return hankel_matrix
+
+    def _get_left_singular_vectors(self, matrix: torch.Tensor, threshold_ratio: float=0.99):
+
+        U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
+        S_squared = S.pow(2)
+        total_energy = S_squared.sum(dim=1, keepdim=True)
+        cumulative_energy = torch.cumsum(S_squared, dim=1)
+        normalized_cumulative_ratio = cumulative_energy / total_energy
+
+        L_mask = (normalized_cumulative_ratio >= threshold_ratio)
+        L_rank_indices = L_mask.int().argmax(dim=1)
+        L_max = L_rank_indices.max().item() + 1
+        L_rank = max(1, L_max)
+
+        Us_left_singular_vectors = U[:, :, :L_max]
+
+        return Us_left_singular_vectors, L_rank
     
