@@ -7,14 +7,16 @@ def extract_power_batch(batch_input_csi: torch.Tensor) -> Optional[torch.Tensor]
 
     # (TODO)
     
-    print(f"      [POWER] Input Shape: {batch_input_csi.shape}")
-    
-    # 1. Compute magnitude squared: |H|^2 
+##### --- Square Every Element of CSI Data ---
     magnitude_squared = batch_input_csi.abs().pow(2)
     
-    # 2. Sum over N_ant and N_sub dimensions (indices 1 and 2)
-    # Resulting shape: (N_batches,)
-    power_tensor_flat = magnitude_squared.sum(dim=[1, 2])
+##### --- Sum ---
+    sum_of_powers = magnitude_squared.sum(dim=[1, 2])
+
+##### --- Avoid log value to be negative infinity ---
+    sum_of_powers = torch.clamp(sum_of_powers, min=1e-9)
+
+##### --- Get Power Value ---
+    power_tensor_flat = 10.0 * torch.log10(sum_of_powers)
     
-    print(f"      [POWER] Output Shape: {power_tensor_flat.shape}")
     return power_tensor_flat

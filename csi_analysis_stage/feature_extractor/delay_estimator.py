@@ -5,7 +5,7 @@ from typing import Optional, List
 
 def estimate_delay_batch(tof_tensor_list: List[torch.Tensor]) -> Optional[torch.Tensor]:
     
-    # (TODO)
+    # (TODO) from ToF to delay
     
     print(f"      [DELAY] Input Type: List[Tensor] (Length {len(tof_tensor_list)})")
     

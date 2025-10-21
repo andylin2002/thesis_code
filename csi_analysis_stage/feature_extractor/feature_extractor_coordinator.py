@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional
 
-from . import mmp_core
+from .mmp_core import MMP_Algorithm
 from . import power_extractor
 from . import delay_estimator
 
@@ -26,9 +26,10 @@ def run_feature_extractor(
     )
 
 ##### --- MMP algorithm (AoA & ToF) ---
-    angle_tensor_flat, tof_tensor_flat = mmp_core.estimate_aoa_tof_batch(
-        batch_input_csi=batch_input_csi, 
-        config=config
+    mmp_engine = MMP_Algorithm(config=config)
+
+    angle_tensor_flat, tof_tensor_flat = mmp_engine.estimate_aoa_tof_batch(
+        batch_input_csi=batch_input_csi
     )
 
 ##### --- Delay ---

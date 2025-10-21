@@ -18,19 +18,20 @@ def run_csi_analysis(
 
 ##### --- Data Preprocessing (on GPU) ---
 
-    processed_csi = run_data_processor(
+    processed_csi_tensor = run_data_processor(
         raw_csi_data_tensor=raw_csi_data_tensor,
         config=config
     )
 
 ##### --- Feature Extraction (on GPU) ---
 
-    feature_matrix = run_feature_extractor(
-        processed_csi=processed_csi,
+    feature_matrix_tensor = run_feature_extractor(
+        processed_csi=processed_csi_tensor,
         config=config
     )
 
-##### --- Back to CPU --- (TODO)
+##### --- Back to CPU ---
+    feature_matrix = feature_matrix_tensor.cpu().numpy().astype(np.float32)
 
     return feature_matrix
     
