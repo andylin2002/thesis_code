@@ -28,20 +28,22 @@ def run_feature_extractor(
 ##### --- MMP algorithm (AoA & ToF) ---
     mmp_engine = MMP_Algorithm(config=config)
 
-    angle_tensor_flat, tof_tensor_list = mmp_engine.estimate_aoa_tof_batch(
+    angle_tensor_flat, tof_tensor, eigv_x, eigv_y = mmp_engine.estimate_aoa_tof_batch(
         input_csi=batch_input_csi
     )
 
 ##### --- Delay ---
-    delay_tensor_flat = delay_estimator.estimate_delay_batch(tof_tensor_list)
+    delay_tensor_flat = delay_estimator.estimate_delay_batch(batch_input_csi, tof_tensor, eigv_x, eigv_y)
 
 ##### --- Stacking & Reshape ---
     features_stacked_flat = torch.stack([
         power_tensor_flat, 
         angle_tensor_flat, 
         delay_tensor_flat
-    ], dim=1) 
+    ], dim=1)
 
     feature_matrix_tensor = features_stacked_flat.reshape(num_sample, num_ap, 3)
+
+    print(feature_matrix_tensor)
 
     return feature_matrix_tensor

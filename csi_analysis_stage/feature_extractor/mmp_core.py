@@ -27,7 +27,7 @@ class MMP_Algorithm:
     def estimate_aoa_tof_batch(
         self, 
         input_csi: torch.Tensor, # (QT, N, M)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
     ##### --- Construct CSI Enhance Matrix ---
         
@@ -35,26 +35,66 @@ class MMP_Algorithm:
 
     ##### --- Find partition the Unitary Matrix U of the left singular values ---
 
-        Us_left_singular_vectors, L_multipath = self._get_left_singular_vectors(input_csi_enhance)
+        Us_left_singular_vectors = self._get_left_singular_vectors(input_csi_enhance)
 
     ##### --- ToF ---
-        tof_tensor, eigenvector_matrix = self._estimate_tof_logic(Us_left_singular_vectors, L_multipath) 
+        tof_tensor, eigv_y, principal_left_singular_vector = self._estimate_tof_logic(Us_left_singular_vectors) 
         
     ##### --- AoA ---
-        aoa_tensor_flat = self._estimate_aoa_logic(Us_left_singular_vectors, L_multipath, eigenvector_matrix)
+        aoa_tensor_flat, eigv_x = self._estimate_aoa_logic(Us_left_singular_vectors, principal_left_singular_vector)
         
-        return aoa_tensor_flat, tof_tensor
+        return aoa_tensor_flat, tof_tensor, eigv_x, eigv_y
     
 
-    def _estimate_tof_logic(self, Us_left_singular_vectors: torch.Tensor, L_multipath: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]: # (TODO)
+    def _estimate_tof_logic(self, Us_left_singular_vectors: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
+        permutation_Us = self._permutation(Us_left_singular_vectors)
 
-        return 0
+        hat_Us_upper = permutation_Us[:, :-2, :]
+        hat_Us_lower = permutation_Us[:, 2:, :]
 
-    def _estimate_aoa_logic(self, Us_left_singular_vectors: torch.Tensor, L_multipath: torch.Tensor, eigenvector_matrix: torch.Tensor) -> torch.Tensor: # (TODO)
-        
+        pinv_hat_Us_upper = torch.linalg.pinv(hat_Us_upper)
+        target_matrix = pinv_hat_Us_upper @ hat_Us_lower
 
-        return 0
+        eigv_y, eigenvector_matrix = torch.linalg.eigh(target_matrix)
+        # tof_tensor.shape: (batch, L)
+        # eigenvector_matrix.shape: (batch, L, L)
+
+        principal_left_singular_vector = eigenvector_matrix[:, :, 0]
+        # principal_left_singular_vector.shape = (batch, L)
+
+        #(TODO) find tof_tensor from eigv_y, shape = [400, 5]
+        tof_tensor = self._eigv_y_to_tof(eigv_y)
+
+        return tof_tensor, eigv_y, principal_left_singular_vector
+
+
+    def _estimate_aoa_logic(self, Us_left_singular_vectors: torch.Tensor, principal_left_singular_vector: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        alpha = self.alpha
+
+        Us_upper = Us_left_singular_vectors[:, :alpha, :]
+        Us_lower = Us_left_singular_vectors[:, alpha:, :]
+
+        pinv_Us_upper = torch.linalg.pinv(Us_upper)
+        target_matrix = pinv_Us_upper @ Us_lower
+
+        eigv_x, _ = torch.linalg.eigh(target_matrix)
+
+    ##### --- Get AoA ---
+        principal_left_singular_vector = principal_left_singular_vector.unsqueeze(-1)
+
+        A = (Us_upper @ principal_left_singular_vector).mH
+        B = Us_lower @ principal_left_singular_vector
+        C = Us_upper @ principal_left_singular_vector
+
+        eigv_x1 = ((A @ B) / (A @ C)).squeeze()
+
+        #(TODO) find aoa_tensor from eigv_x1, shape = [400]
+        aoa_tensor_flat = self._eigv_x1_to_aoa(eigv_x1)
+
+        return aoa_tensor_flat, eigv_x
+
 
     def _construct_enhance_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
 
@@ -80,7 +120,7 @@ class MMP_Algorithm:
 
         return hankel_matrix
 
-    def _get_left_singular_vectors(self, matrix: torch.Tensor, threshold_ratio: float=0.99) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_left_singular_vectors(self, matrix: torch.Tensor, threshold_ratio: float=0.99) -> torch.Tensor:
 
         batch, row, col = matrix.shape
 
@@ -105,8 +145,43 @@ class MMP_Algorithm:
 
         Us = U[:, :, :L_multipath]
 
-        return Us, L_multipath
+        return Us
     
     def _permutation(self, even_row_matrix: torch.Tensor) -> torch.Tensor:
 
-        pass
+        batch, even_row, col = even_row_matrix.shape
+        if even_row % 2 != 0:
+             raise ValueError("Can't Permute the matrix since it's row is not even!")
+        row = even_row // 2
+
+        matrix_B_2_R_C = even_row_matrix.reshape(batch, 2, row, col)
+
+        matrix_B_R_2_C = matrix_B_2_R_C.transpose(1, 2)
+
+        permuted_even_row_matrix = matrix_B_R_2_C.reshape(batch, even_row, col)
+
+        return permuted_even_row_matrix
+    
+    def _eigv_y_to_tof(self, eigv_y: torch.Tensor) -> torch.Tensor:
+
+        ln_y = torch.log(eigv_y)
+
+        numerator = 1j * self.M_subcarrier * ln_y
+        denominator = 2 * torch.pi * self.B_channel_bandwith_hz
+
+        tof_tensor = (numerator / denominator).real
+
+        return tof_tensor
+
+    def _eigv_x1_to_aoa(self, eigv_x1: torch.Tensor) -> torch.Tensor:
+
+        ln_x1 = torch.log(eigv_x1)
+
+        numerator = 1j * self.wavelength * ln_x1
+        denominator = 2 * torch.pi * self.d_antenna_spacing
+
+        sin_phi_term = (numerator / denominator).real
+        aoa_radians = torch.arcsin(sin_phi_term)
+        aoa_degrees = aoa_radians * (180.0 / torch.pi)
+
+        return aoa_degrees
