@@ -1,29 +1,47 @@
-import numpy as np
+import torch
 
-# === 1. 讀取原始 CSI 檔 ===
-input_path = "csi_sample.npy"   # 你的原始 .npy 檔案
-output_path = "csi_sample_TQNM.npy"  # 轉換後輸出的檔案名稱
+# -----------------------------
+# 建立 Hankel 矩陣
+# -----------------------------
+def construct_hankel_matrix(vector: torch.Tensor, row: int, col: int) -> torch.Tensor:
 
-# 載入 .npy 檔案
-csi = np.load(input_path)
-print(f"原始形狀: {csi.shape}, 資料型態: {csi.dtype}")
+        # 'unfold' function needs the unsqueezing dimension
+        vector_unfoldable = vector.unsqueeze(1) # (QT, 1, M)
+        hankel_unfolded = vector_unfoldable.unfold(2, col, 1) # (QT, 1, row, col)
+        hankel_matrix = hankel_unfolded.squeeze(1).contiguous() # (QT, row, col)
 
-# === 2. 檢查形狀是否為 (Q, N, M, T) ===
-if csi.ndim != 4:
-    raise ValueError(f"資料維度應該是4維，但目前是 {csi.ndim} 維")
+        return hankel_matrix
 
-# === 3. 調整維度順序 (Q, N, M, T) → (T, Q, N, M) ===
-# np.transpose 會根據索引重新排列維度
-# 原順序 index: Q(0), N(1), M(2), T(3)
-# 目標順序 index: T(3), Q(0), N(1), M(2)
-csi_reordered = np.transpose(csi, (3, 0, 1, 2))
+# -----------------------------
+# 組成 enhance matrix
+# -----------------------------
+def construct_enhance_matrix(matrix: torch.Tensor) -> torch.Tensor:
+    alpha = 5
+    beta = 6
+    
+    C1 = construct_hankel_matrix(matrix[:, 0, :], alpha, beta)
+    C2 = construct_hankel_matrix(matrix[:, 1, :], alpha, beta)
+    C3 = construct_hankel_matrix(matrix[:, 2, :], alpha, beta)
 
-print(f"轉換後形狀: {csi_reordered.shape}")
+    row1 = torch.cat([C1, C2], dim=2)  # (B, 5, 12)
+    row2 = torch.cat([C2, C3], dim=2)  # (B, 5, 12)
+    enhance_matrix = torch.cat([row1, row2], dim=1)  # (B, 10, 12)
 
-# === 4. 儲存轉換後的結果 ===
-np.save(output_path, csi_reordered)
-print(f"已儲存轉換後的檔案至: {output_path}")
+    return enhance_matrix
 
-# === 5. 驗證重新載入是否一致 ===
-csi_check = np.load(output_path)
-print(f"驗證載入形狀: {csi_check.shape}, dtype: {csi_check.dtype}")
+# -----------------------------
+# 建立輸入 tensor
+# -----------------------------
+matrix = torch.tensor([
+    [
+        [1,2,3,4,5,6,7,8,9,10],
+        [11,12,13,14,15,16,17,18,19,20],
+        [21,22,23,24,25,26,27,28,29,30]
+    ]
+], dtype=torch.float32)
+
+enhance_matrix = construct_enhance_matrix(matrix)
+
+print("Input shape:", matrix.shape)
+print("Enhance matrix shape:", enhance_matrix.shape)
+print("Enhance matrix:\n", enhance_matrix)

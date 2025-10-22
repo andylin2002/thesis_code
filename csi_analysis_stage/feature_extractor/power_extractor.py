@@ -1,12 +1,12 @@
 import torch
 from typing import Optional
 
-def extract_power_batch(batch_input_csi: torch.Tensor) -> Optional[torch.Tensor]:
+def extract_power_batch(input_csi: torch.Tensor) -> Optional[torch.Tensor]:
 
     # (TODO)
     
 ##### --- Square Every Element of CSI Data ---
-    magnitude_squared = batch_input_csi.abs().pow(2)
+    magnitude_squared = input_csi.abs().pow(2)
     
 ##### --- Sum ---
     sum_of_powers = magnitude_squared.sum(dim=[1, 2])
