@@ -14,7 +14,7 @@ def run_csi_analysis(
 ) -> Optional[np.ndarray]:
     
 ##### --- Put CSI Data on GPU ---
-    raw_csi_data_tensor = torch.from_numpy(raw_csi_data).to(DEVICE).to(torch.complex64) # (TP, Q, N, M)
+    raw_csi_data_tensor = torch.from_numpy(raw_csi_data).to(DEVICE).to(torch.complex64) # (Q, TP, N, M)
 
 ##### --- Data Preprocessing (on GPU) ---
 

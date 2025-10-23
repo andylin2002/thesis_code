@@ -48,22 +48,25 @@ class MMP_Algorithm:
 
     def _estimate_tof_logic(self, Us_left_singular_vectors: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
+    ##### --- Prepare the element that Lemma will use ---
         permutation_Us = self._permutation(Us_left_singular_vectors)
-
         hat_Us_upper = permutation_Us[:, :-2, :]
         hat_Us_lower = permutation_Us[:, 2:, :]
 
+    ##### --- Find Diagonalizable Matrix ---
         pinv_hat_Us_upper = torch.linalg.pinv(hat_Us_upper)
         target_matrix = pinv_hat_Us_upper @ hat_Us_lower
 
-        eigv_y, eigenvector_matrix = torch.linalg.eigh(target_matrix)
-        # tof_tensor.shape: (batch, L)
+    ##### --- Diagonalization ---
+        eigv_y, eigenvector_matrix = torch.linalg.eig(target_matrix)
+        # eigv_y.shape: (batch, L)
         # eigenvector_matrix.shape: (batch, L, L)
 
+    ##### --- We Can Use 'principal_left_singular_vector' to Find eigv_x1 ---
         principal_left_singular_vector = eigenvector_matrix[:, :, 0]
         # principal_left_singular_vector.shape = (batch, L)
 
-        #(TODO) find tof_tensor from eigv_y, shape = [400, 5]
+    ##### --- eigv_y -> ToF ---
         tof_tensor = self._eigv_y_to_tof(eigv_y)
 
         return tof_tensor, eigv_y, principal_left_singular_vector
@@ -73,15 +76,18 @@ class MMP_Algorithm:
 
         alpha = self.alpha
 
+    ##### --- Find Diagonalizable Matrix ---
         Us_upper = Us_left_singular_vectors[:, :alpha, :]
         Us_lower = Us_left_singular_vectors[:, alpha:, :]
 
         pinv_Us_upper = torch.linalg.pinv(Us_upper)
         target_matrix = pinv_Us_upper @ Us_lower
 
-        eigv_x, _ = torch.linalg.eigh(target_matrix)
+    ##### --- Diagonalization ---
+        eigv_x, _ = torch.linalg.eig(target_matrix)
+        # eigv_x.shape: (batch, L)
 
-    ##### --- Get AoA ---
+    ##### --- Find eigv_x1 ---
         principal_left_singular_vector = principal_left_singular_vector.unsqueeze(-1)
 
         A = (Us_upper @ principal_left_singular_vector).mH
@@ -90,7 +96,7 @@ class MMP_Algorithm:
 
         eigv_x1 = ((A @ B) / (A @ C)).squeeze()
 
-        #(TODO) find aoa_tensor from eigv_x1, shape = [400]
+    ##### --- eigv_x1 -> AoA ---
         aoa_tensor_flat = self._eigv_x1_to_aoa(eigv_x1)
 
         return aoa_tensor_flat, eigv_x
@@ -100,7 +106,7 @@ class MMP_Algorithm:
 
         alpha = self.alpha
         beta = self.beta
-        
+
         C1 = self._construct_hankel_matrix(matrix[:, 0, :], alpha, beta)
         C2 = self._construct_hankel_matrix(matrix[:, 1, :], alpha, beta)
         C3 = self._construct_hankel_matrix(matrix[:, 2, :], alpha, beta)
@@ -124,12 +130,14 @@ class MMP_Algorithm:
 
         batch, row, col = matrix.shape
 
+    ##### --- Ignore Paths with no Influence by Energy Threshold ---
         U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
         S_squared = S.pow(2)
         total_energy = S_squared.sum(dim=1, keepdim=True)
         cumulative_energy = torch.cumsum(S_squared, dim=1)
         normalized_cumulative_ratio = cumulative_energy / total_energy
 
+    ##### --- Choose Numbers of path ---
         # shape: (batch, L(t,q))
         L_mask = (normalized_cumulative_ratio >= threshold_ratio)
         L_rank_indices = L_mask.int().argmax(dim=1) + 1
@@ -143,6 +151,7 @@ class MMP_Algorithm:
         L_multipath = math.ceil(L_multipath_float)
         L_multipath = int(torch.clamp(torch.tensor(L_multipath), min=1, max=col).item())
 
+    ##### --- Get Us ---
         Us = U[:, :, :L_multipath]
 
         return Us

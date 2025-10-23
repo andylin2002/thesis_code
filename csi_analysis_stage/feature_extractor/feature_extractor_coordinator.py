@@ -17,7 +17,7 @@ def run_feature_extractor(
     num_sample = config['NUM_SAMPLE']
 
 ##### --- Prepare for Batch Processing ---
-    num_batch = num_sample * num_ap
+    num_batch = num_ap * num_sample
     batch_input_csi = processed_csi.reshape(num_batch, *processed_csi.shape[2:]).contiguous() # (QT, N, M)
     
 ##### --- Power ---
@@ -33,7 +33,7 @@ def run_feature_extractor(
     )
 
 ##### --- Delay ---
-    delay_tensor_flat = delay_estimator.estimate_delay_batch(batch_input_csi, tof_tensor, eigv_x, eigv_y)
+    delay_tensor_flat = delay_estimator.estimate_delay_batch(tof_tensor, eigv_x, eigv_y)
 
 ##### --- Stacking & Reshape ---
     features_stacked_flat = torch.stack([
@@ -44,6 +44,10 @@ def run_feature_extractor(
 
     feature_matrix_tensor = features_stacked_flat.reshape(num_sample, num_ap, 3)
 
-    print(feature_matrix_tensor)
+    target_elements = feature_matrix_tensor[:, :, 2]
+    mean_of_target = target_elements.mean()
+    std_of_target = target_elements.std()
+    print(f"這些元素的整體平均值: {mean_of_target.item():.4f}")
+    print(f"這些元素的整體標準差: {std_of_target.item():.4f}")
 
     return feature_matrix_tensor

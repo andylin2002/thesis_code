@@ -38,6 +38,7 @@ def main():
     config=config
     )
 
+##### --- Print Result ---
     print(predicted_path[0:10])
 
 if __name__ == '__main__':

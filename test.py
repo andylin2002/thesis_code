@@ -1,47 +1,22 @@
-import torch
+import numpy as np
 
-# -----------------------------
-# 建立 Hankel 矩陣
-# -----------------------------
-def construct_hankel_matrix(vector: torch.Tensor, row: int, col: int) -> torch.Tensor:
+# 定义要读取的文件名
+file_name = 'csi_sample_swapped.npy'
 
-        # 'unfold' function needs the unsqueezing dimension
-        vector_unfoldable = vector.unsqueeze(1) # (QT, 1, M)
-        hankel_unfolded = vector_unfoldable.unfold(2, col, 1) # (QT, 1, row, col)
-        hankel_matrix = hankel_unfolded.squeeze(1).contiguous() # (QT, row, col)
-
-        return hankel_matrix
-
-# -----------------------------
-# 組成 enhance matrix
-# -----------------------------
-def construct_enhance_matrix(matrix: torch.Tensor) -> torch.Tensor:
-    alpha = 5
-    beta = 6
+try:
+    # 使用 numpy.load() 加载 .npy 文件
+    data = np.load(file_name)
     
-    C1 = construct_hankel_matrix(matrix[:, 0, :], alpha, beta)
-    C2 = construct_hankel_matrix(matrix[:, 1, :], alpha, beta)
-    C3 = construct_hankel_matrix(matrix[:, 2, :], alpha, beta)
+    # 获取并打印数组的形状
+    shape = data.shape
+    print(f"成功加载文件: {file_name}")
+    print(f"数组的形状 (Shape) 是: {shape}")
+    
+    # 也可以打印数组的其他信息，例如数据类型和维度数量
+    print(f"数组的数据类型 (Dtype) 是: {data.dtype}")
+    print(f"数组的维度数量 (Ndim) 是: {data.ndim}")
 
-    row1 = torch.cat([C1, C2], dim=2)  # (B, 5, 12)
-    row2 = torch.cat([C2, C3], dim=2)  # (B, 5, 12)
-    enhance_matrix = torch.cat([row1, row2], dim=1)  # (B, 10, 12)
-
-    return enhance_matrix
-
-# -----------------------------
-# 建立輸入 tensor
-# -----------------------------
-matrix = torch.tensor([
-    [
-        [1,2,3,4,5,6,7,8,9,10],
-        [11,12,13,14,15,16,17,18,19,20],
-        [21,22,23,24,25,26,27,28,29,30]
-    ]
-], dtype=torch.float32)
-
-enhance_matrix = construct_enhance_matrix(matrix)
-
-print("Input shape:", matrix.shape)
-print("Enhance matrix shape:", enhance_matrix.shape)
-print("Enhance matrix:\n", enhance_matrix)
+except FileNotFoundError:
+    print(f"错误: 文件 '{file_name}' 未找到。请确保文件在当前目录下或提供正确的路径。")
+except Exception as e:
+    print(f"加载文件 '{file_name}' 时发生错误: {e}")
