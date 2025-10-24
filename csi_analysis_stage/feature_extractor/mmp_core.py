@@ -6,7 +6,6 @@ import math
 
 import numpy as np
 
-#(TODO) complete mmp algorithm
 class MMP_Algorithm:
     def __init__(self, config: Dict[str, Any]):
         

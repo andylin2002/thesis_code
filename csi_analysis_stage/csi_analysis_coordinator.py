@@ -11,7 +11,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 def run_csi_analysis(
         raw_csi_data: np.ndarray, 
         config: Dict[str, Any]
-) -> Optional[np.ndarray]:
+) -> Optional[torch.Tensor]:
     
 ##### --- Put CSI Data on GPU ---
     raw_csi_data_tensor = torch.from_numpy(raw_csi_data).to(DEVICE).to(torch.complex64) # (Q, TP, N, M)
@@ -30,8 +30,5 @@ def run_csi_analysis(
         config=config
     )
 
-##### --- Back to CPU ---
-    feature_matrix = feature_matrix_tensor.cpu().numpy().astype(np.float32)
-
-    return feature_matrix
+    return feature_matrix_tensor
     

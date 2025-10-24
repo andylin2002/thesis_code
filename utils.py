@@ -145,6 +145,3 @@ def load_raw_csi(path):
     except FileNotFoundError:
         print(f"Error: Raw data file not found at {path}. Please check file existence.")
         return None
-    
-#(TODO) construct log guassian
-# def log_guassian():

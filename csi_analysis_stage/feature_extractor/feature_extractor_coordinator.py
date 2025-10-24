@@ -42,12 +42,6 @@ def run_feature_extractor(
         delay_tensor_flat
     ], dim=1)
 
-    feature_matrix_tensor = features_stacked_flat.reshape(num_sample, num_ap, 3)
-
-    target_elements = feature_matrix_tensor[:, :, 2]
-    mean_of_target = target_elements.mean()
-    std_of_target = target_elements.std()
-    print(f"這些元素的整體平均值: {mean_of_target.item():.4f}")
-    print(f"這些元素的整體標準差: {std_of_target.item():.4f}")
+    feature_matrix_tensor = features_stacked_flat.reshape(num_ap, num_sample, 3)
 
     return feature_matrix_tensor

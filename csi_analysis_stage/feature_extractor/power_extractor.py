@@ -2,8 +2,6 @@ import torch
 from typing import Optional
 
 def extract_power_batch(input_csi: torch.Tensor) -> Optional[torch.Tensor]:
-
-    # (TODO)
     
 ##### --- Square Every Element of CSI Data ---
     magnitude_squared = input_csi.abs().pow(2)

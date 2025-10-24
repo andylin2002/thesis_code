@@ -32,14 +32,15 @@ def main():
 ##### --- Starting Indoor Location Stage ---
     from indoor_location_stage import run_indoor_location
 
-    predicted_path = run_indoor_location(
+    trajectory = run_indoor_location(
     feature_matrix=feature_matrix, 
     reference_grid=reference_grid, 
+    APs_LOS_ratio=APs_LOS_ratio, # (TODO: main -> csi2traj and pass gamma with iteration in new 'main.py')
     config=config
     )
 
-##### --- Print Result ---
-    print(predicted_path[0:10])
+##### --- Predicted Trajectory ---
+    print(trajectory[0:10])
 
 if __name__ == '__main__':
     main()
