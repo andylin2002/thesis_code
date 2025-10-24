@@ -2,6 +2,7 @@ import yaml
 import numpy as np
 from typing import List, Tuple, Dict, Any
 import matplotlib.pyplot as plt
+import torch
 
 def load_yaml_config(file_path: str) -> Dict[str, Any]:
     """
@@ -22,7 +23,7 @@ def round_to_half(value: float) -> float:
     """Rounds a floating-point number to the nearest multiple of 0.5."""
     return round(value * 2) / 2
 
-def generate_reference_grid(config: Dict[str, Any]) -> Tuple[np.ndarray, List[float], List[float], np.ndarray]:
+def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[float], List[float]]:
     """
     Calculates the boundary of the localization area and generates
     a uniform grid of prediction points based on AP locations.
@@ -84,6 +85,7 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[np.ndarray, List[fl
     # Create the meshgrid and flatten to N_points x 2 array
     X, Y = np.meshgrid(x_coords, y_coords)
     grid_points = np.vstack([X.ravel(), Y.ravel()]).T
+    grid_points_tensor = torch.from_numpy(grid_points).float().cuda()
 
     print("\n--- Grid Generation Summary ---")
     print(f"X Bounds: [{x_min:.2f}, {x_max:.2f}] m")
@@ -91,7 +93,7 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[np.ndarray, List[fl
     print(f"Grid Resolution: {resolution} m")
     print(f"Total Reference Points: {grid_points.shape[0]}")
     
-    return grid_points, x_limits, y_limits, ap_locations_array
+    return grid_points_tensor, x_limits, y_limits
 
 def visualize_grid_and_aps(grid_points: np.ndarray, ap_locations: np.ndarray, x_bounds: List[float], y_bounds: List[float]):
     """

@@ -1,46 +1,35 @@
 import utils
-import numpy as np
+import torch
+import argparse
+from csi2traj import CSItoTRAJ
 
 CONFIG_PATH = 'config.yaml'
 
 def main():
+    parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
+    parser.add_argument('--em_max_iter', type=int, default=20)
+
+    args=parser.parse_args()
+
 ##### --- Loading Environment & System Configuration ---
     config = utils.load_yaml_config(CONFIG_PATH)
     if not (config):
         print("Configuration loading failed.")
         return
+    
+##### --- Put Hyperparameter into Config ---
+    config['EM_MAX_ITER'] = args.em_max_iter
 
 ##### --- Reference Point Setup ---
-    reference_grid, x_bounds, y_bounds, ap_locations = utils.generate_reference_grid(config)
+    reference_grid, x_bounds, y_bounds = utils.generate_reference_grid(config)
 
-##### --- Importing Raw CSI Data ---
-    RAW_CSI_PATH = 'csi_sample.npy'
-    raw_csi_data = utils.load_raw_csi(RAW_CSI_PATH)
+    APs_LOS_ratio = torch.full((4, 2), 0.5, dtype=torch.float32)
 
-    if raw_csi_data is None:
-        print("CSI data loading failed.")
-        return
-    
-##### --- Starting CSI Analysis Stage ---
-    from csi_analysis_stage import run_csi_analysis
+    csi2traj_engine = CSItoTRAJ(config, reference_grid, APs_LOS_ratio)
 
-    feature_matrix = run_csi_analysis(
-        raw_csi_data=raw_csi_data,
-        config=config
-    )
+    for i in range(1):
+        csi2traj_engine.run_csi2traj()
 
-##### --- Starting Indoor Location Stage ---
-    from indoor_location_stage import run_indoor_location
-
-    trajectory = run_indoor_location(
-    feature_matrix=feature_matrix, 
-    reference_grid=reference_grid, 
-    APs_LOS_ratio=APs_LOS_ratio, # (TODO: main -> csi2traj and pass gamma with iteration in new 'main.py')
-    config=config
-    )
-
-##### --- Predicted Trajectory ---
-    print(trajectory[0:10])
 
 if __name__ == '__main__':
     main()

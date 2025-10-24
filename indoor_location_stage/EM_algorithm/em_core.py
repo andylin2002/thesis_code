@@ -25,16 +25,13 @@ class EM_Algorithm:
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']
 
-    ##### --- Hyperparameter --- # (TODO: arg)
-        self.max_iterations = 20 # 這個變數是避免EM花太久時間
-
     ##### --- Initialization ---
         self.trajectory = self._initialize_Trajectory() # 馬可夫鏈初始化
         self.propagation_params = self._initialize_PropParams()
 
     def run_em_iterations(self) -> Optional[TypeTrajectory]:
 
-        for i in range(self.max_iterations):
+        for i in range(self.config['EM_MAX_ITER']):
             self._findPropParams_step()
             self._findTrajectory_step()
             

@@ -8,18 +8,16 @@ TypeTrajectory = torch.Tensor
 
 def run_indoor_location(
     feature_matrix: torch.Tensor, 
-    reference_grid: np.ndarray, 
+    reference_grid: torch.Tensor, 
     APs_LOS_ratio: torch.Tensor,
     config: Dict[str, Any]
 ) -> Optional[TypeTrajectory]:
-    
-    reference_grid_tensor = torch.from_numpy(reference_grid).float().cuda() 
 
 ##### --- EM Algorithm ---
 
     em_engine = EM_Algorithm(
         feature_matrix=feature_matrix, 
-        reference_grid=reference_grid_tensor, 
+        reference_grid=reference_grid, 
         gamma_APs_LOS_ratio=APs_LOS_ratio,
         config=config
     )
