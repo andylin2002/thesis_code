@@ -4,8 +4,6 @@ import torch
 from typing import Dict, Any, Tuple
 import math
 
-import numpy as np
-
 class MMP_Algorithm:
     def __init__(self, config: Dict[str, Any]):
         
