@@ -6,12 +6,11 @@ from .EM_algorithm.em_core import EM_Algorithm
 TypeTrajectory = torch.Tensor
 
 def run_indoor_location(
-    feature_matrix: torch.Tensor, 
-    config: Dict[str, Any],
-    reference_grid: torch.Tensor, 
-    context: Dict[str, Any],
-    
-) -> Optional[TypeTrajectory]:
+        feature_matrix: torch.Tensor, 
+        config: Dict[str, Any],
+        reference_grid: torch.Tensor, 
+        context: Dict[str, Any],
+    ) -> Optional[TypeTrajectory]:
 
 ##### --- EM Algorithm ---
 

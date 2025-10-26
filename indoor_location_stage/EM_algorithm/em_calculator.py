@@ -3,40 +3,34 @@ from typing import Dict, Any, Optional
 from torch.distributions import Normal
 
 TypeTrajectory = torch.Tensor
-    
-# (TODO)
-# (TODO: 讓進到build_gaussian_distribution的mean, var都是qtk形狀)
+
 def build_gaussian_distribution(mean: torch.Tensor, variance: torch.Tensor) -> Normal:
-    """
-    建構 PyTorch Normal 分佈物件。
     
-    :param mean: 均值 (mu)。
-    :param variance: 變異數 (sigma^2)。
-    :return: Normal 分佈實例。
-    """
-    # 變異數必須先轉換成標準差 (std_dev = sqrt(variance))
+##### --- variance to standard deviation ---
     std_dev = torch.sqrt(variance)
-    
-    # 為了數值穩定性，確保標準差不是零
     std_dev = torch.clamp(std_dev, min=1e-6)
     
-    # 建立分佈物件
+##### --- Construct Normal Distribution ---
     gaussian_dist = Normal(loc=mean, scale=std_dev)
     
     return gaussian_dist
 
-def calculate_L_tq(self, trajectory: TypeTrajectory) -> torch.Tensor:
+def calculate_L_tq(
+        config: Dict[str, Any], 
+        trajectory: TypeTrajectory, 
+        Q: int
+    ) -> torch.Tensor:
 
     ##### --- Prepare AP's position and trajectory ---
         ap_locations_list = []
-        for ap_id in range(1, self.num_ap + 1):
+        for ap_id in range(1, Q + 1):
             ap_key = f"AP_{ap_id}"
-            if ap_key in self.config['ACCESS_POINTS']:
-                ap_locations_list.append(self.config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
+            if ap_key in config['ACCESS_POINTS']:
+                ap_locations_list.append(config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
             else:
                 raise ValueError(f"Missing location data for AP ID {ap_id}")
             
-        ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=DEVICE)
+        ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=trajectory.device)
         ap_locations_expanded = ap_locations.unsqueeze(1)
         trajectory_expanded = trajectory.unsqueeze(0)
 
@@ -48,79 +42,264 @@ def calculate_L_tq(self, trajectory: TypeTrajectory) -> torch.Tensor:
 
         return L_qt
 
-def calculate_weighted_mean(self, 
-                            data_qt: torch.Tensor, 
-                            gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算加權平均值 (例如 power_qk_mean)。
-    :param data_qt: 特徵數據，形狀 (Q, T) 或 (Q, T, F)
-    :param gamma_qtk: 後驗責任，形狀 (Q, T, K) 或 (Q, T)
-    :return: 加權平均值，形狀 (Q, K) 或 (K)
-    """
-    pass
+def calculate_weighted_average(data_qt: torch.Tensor, 
+                               gamma_qtk: torch.Tensor) -> torch.Tensor:
+    
+    data_qtk = data_qt.unsqueeze(2)
+
+    weighted_sum = gamma_qtk * data_qtk
+
+    numerator = weighted_sum.sum(dim=1)
+    denominator = gamma_qtk.sum(dim=1)
+
+    weighted_average = numerator / denominator.clamp(min=1e-10)
+
+    return weighted_average
 
 # ----------------------------------------------------
-# --- 參數更新函式 (M-step) ---
+# --- Parameters Update ---
 # ----------------------------------------------------
 
-# Power/RSS 相關參數
+###########################################
+##### --- Power's mean & variance --- #####
+###########################################
 
-def calculate_alpha_qk(self, 
-                    power_qt: torch.Tensor, 
-                    power_qk_mean: torch.Tensor, 
-                    L_qt: torch.Tensor, 
-                    L_qk_mean: torch.Tensor, 
-                    gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算路徑損耗指數 alpha_qk (對應論文公式 223)。
-    """
+def calculate_alpha_qk(
+        power_qt: torch.Tensor, 
+        power_qk_average: torch.Tensor, 
+        L_qt: torch.Tensor, 
+        L_qk_average: torch.Tensor, 
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+    
+    L_qtk = L_qt.unsqueeze(2)
+    L_qtk_mean = L_qk_average.unsqueeze(1)
+    term_L = L_qtk - L_qtk_mean
+
+    power_qtk = power_qt.unsqueeze(2)
+    power_qtk_mean = power_qk_average.unsqueeze(1)
+    term_power = power_qtk - power_qtk_mean
+
+    numerator_term = gamma_qtk * term_L * term_power
+    denominator_term = gamma_qtk * (term_L ** 2)
+
+    numerator = numerator_term.sum(dim=1)
+    denominator = denominator_term.sum(dim=1)
+
+    alpha_qk = numerator / denominator.clamp(min=1e-10)
+
+    return alpha_qk
+
+def calculate_beta_qk(
+        alpha_qk: torch.Tensor, 
+        power_qk_average: torch.Tensor, 
+        L_qk_average: torch.Tensor
+    ) -> torch.Tensor:
+    
+    term_alpha_L = alpha_qk * L_qk_average
+    beta_qk = power_qk_average + term_alpha_L
+
+    return beta_qk
+
+def calculate_power_qtk_mean(
+        alpha_qk: torch.Tensor,
+        beta_qk: torch.Tensor, 
+        L_qt: torch.Tensor    
+    ):
+
+    alpha_qtk = alpha_qk.unsqueeze(1)
+    beta_qtk = beta_qk.unsqueeze(1)
+    L_qtk = L_qt.unsqueeze(2)
+
+    power_qtk_mean = beta_qtk - (alpha_qtk * L_qtk)
+
+    return power_qtk_mean
+
+def calculate_power_qk_var( 
+        power_qt: torch.Tensor,
+        power_qtk_mean_predicted: torch.Tensor, 
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+
+    power_qtk = power_qt.unsqueeze(2)
+
+    squared_error = (power_qtk - power_qtk_mean_predicted) ** 2
+    weighted_squared_error = gamma_qtk * squared_error
+
+    numerator = weighted_squared_error.sum(dim=1)
+    denominator = gamma_qtk.sum(dim=1)
+
+    power_qk_var = numerator / denominator.clamp(min=1e-10)
+    
+    return power_qk_var
+
+###########################################
+##### --- Angle's mean & variance --- #####
+###########################################
+
+def calculate_angle_qt_mean(
+        config: Dict[str, Any], 
+        trajectory: TypeTrajectory, 
+        Q: int  
+    ) -> torch.Tensor:
+
+##### --- Prepare AP's position and trajectory ---
+    ap_locations_list = []
+    for ap_id in range(1, Q + 1):
+        ap_key = f"AP_{ap_id}"
+        if ap_key in config['ACCESS_POINTS']:
+            ap_locations_list.append(config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
+        else:
+            raise ValueError(f"Missing location data for AP ID {ap_id}")
+        
+    ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=trajectory.device)
+    ap_locations_expanded = ap_locations.unsqueeze(1)
+    trajectory_expanded = trajectory.unsqueeze(0)
+
+    vector_V_qt = trajectory_expanded - ap_locations_expanded
+    x_diff = vector_V_qt[..., 0]
+    y_diff = vector_V_qt[..., 1]
+
+    angle_rad_qt = torch.atan2(y_diff, x_diff)
+    angle_deg_qt = torch.rad2deg(angle_rad_qt)
+
+    angle_qt_mean = angle_deg_qt
+
+    return angle_qt_mean
+
+def calculate_angle_k_var(
+        angle_qt_mean: torch.Tensor,
+        angle_qt: torch.Tensor, 
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+    
+    angle_qtk = angle_qt.unsqueeze(2)
+    angle_qtk_mean = angle_qt_mean.unsqueeze(2)
+
+    numerator_term = gamma_qtk * ((angle_qtk - angle_qtk_mean) ** 2)
+    numerator = numerator_term.sum(dim=(0, 1))
+
+    denominator = gamma_qtk.sum(dim=(0, 1))
+
+    angle_k_var = numerator / denominator.clamp(min=1e-10)
+
+    return angle_k_var
+
+###########################################
+##### --- Delay's mean & variance --- #####
+###########################################
+
+def calculate_delay_k_mean(
+        delay_qt: torch.Tensor, 
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+
+    delay_qtk = delay_qt.unsqueeze(2)
+
+    numerator_term = gamma_qtk * (delay_qtk)
+    numerator = numerator_term.sum(dim=(0, 1))
+
+    denominator = gamma_qtk.sum(dim=(0, 1))
+
+    delay_k_mean = numerator / denominator.clamp(min=1e-10)
+
+    return delay_k_mean
+
     pass
 
-def calculate_beta_qk(self, 
-                    alpha_qk: torch.Tensor, 
-                    power_qk_mean: torch.Tensor, 
-                    L_qk_mean: torch.Tensor) -> torch.Tensor:
-    """
-    計算參考路徑損耗 beta_qk (對應論文公式 224)。
-    """
-    pass
+def calculate_delay_k_var(
+        delay_k_mean: torch.Tensor, 
+        delay_qt: torch.Tensor, 
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+    
+    delay_qtk = delay_qt.unsqueeze(2)
+    delay_qtk_mean = delay_k_mean.view(1, 1, -1)
 
-def calculate_power_qk_std_dev(self, 
-                            alpha_qk: torch.Tensor, 
-                            beta_qk: torch.Tensor, 
-                            power_qt: torch.Tensor, 
-                            L_qt: torch.Tensor, 
-                            gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算 RSS 方差 sigma_s,q,k^2 (對應論文公式 289)。
-    """
-    pass
+    squared_error = (delay_qtk - delay_qtk_mean) ** 2
+    weighted_squared_error = gamma_qtk * squared_error
 
-# Angle 相關參數
+    numerator = weighted_squared_error.sum(dim=(0, 1))
+    denominator = gamma_qtk.sum(dim=(0, 1))
 
-def calculate_angle_k_std_dev(self, 
-                            angle_qt: torch.Tensor, 
-                            gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算 AoD 方差 sigma_theta,k^2 (對應論文公式 290)。
-    """
-    pass
+    delay_k_var = numerator / denominator.clamp(min=1e-10)
 
-# Delay 相關參數
+    return delay_k_var
 
-def calculate_delay_k_mean(self, 
-                            delay_qt: torch.Tensor, 
-                            gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算延遲擴散均值 mu_k (對應論文公式 291)。
-    """
-    pass
+###########################################
+##### --- Global & AP's LOS ratio --- #####
+###########################################
 
-def calculate_delay_k_std_dev(self, 
-                            delay_k_mean: torch.Tensor, 
-                            delay_qt: torch.Tensor, 
-                            gamma_qtk: torch.Tensor) -> torch.Tensor:
-    """
-    計算延遲擴散協方差 Sigma_k (對應論文公式 292)。
-    """
-    pass
+def calculate_pi(
+        gamma_qtk: torch.Tensor
+    ) -> torch.Tensor:
+
+    sum_gamma_over_QT = gamma_qtk.sum(dim=(0, 1))
+
+    pi_k = sum_gamma_over_QT / (gamma_qtk.shape[0] * gamma_qtk.shape[1])
+
+    return pi_k
+
+def calculate_gamma_qtk(
+        pi_k: torch.Tensor,                     # Shape: (K)
+        power_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        angle_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        delay_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        power_qt: torch.Tensor,                 # Shape: (Q, T)
+        angle_qt: torch.Tensor,                 # Shape: (Q, T)
+        delay_qt: torch.Tensor,                 # Shape: (Q, T)
+    ) -> torch.Tensor:
+
+    log_P_power = power_dist.log_prob(power_qt.unsqueeze(2))
+    log_P_angle = angle_dist.log_prob(angle_qt.unsqueeze(2))
+    log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
+    log_pi_k = torch.log(pi_k.clamp(min=1e-10))
+
+    log_unnormalized_prob_qtk = (
+        log_pi_k                            
+        + log_P_power
+        + log_P_angle 
+        + log_P_delay
+    )
+
+    unnormalized_prob_qtk = torch.exp(log_unnormalized_prob_qtk)
+    normalization_constant = unnormalized_prob_qtk.sum(dim=2, keepdim=True)
+
+    gamma_qtk = unnormalized_prob_qtk / normalization_constant.clamp(min=1e-10)
+
+    return gamma_qtk
+
+###########################################
+##### --- EM Emission Probability --- #####
+###########################################
+
+def calculate_MEPLL_PropParams(
+        pi_k: torch.Tensor,                     # Shape: (K)
+        power_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        angle_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        delay_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
+        power_qt: torch.Tensor,                 # Shape: (Q, T)
+        angle_qt: torch.Tensor,                 # Shape: (Q, T)
+        delay_qt: torch.Tensor,                 # Shape: (Q, T)
+        gamma_qtk: torch.Tensor                 # Shape: (Q, T, K)
+    ) -> torch.Tensor:
+
+    K = gamma_qtk.shape[2]
+
+    log_P_power = power_dist.log_prob(power_qt.unsqueeze(2))
+    log_P_angle = angle_dist.log_prob(angle_qt.unsqueeze(2))
+    log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
+    log_pi_k = torch.log(pi_k.clamp(min=1e-10))
+
+    log_joint_prob_qtk = (
+        log_pi_k
+        + log_P_power 
+        + log_P_angle
+        + log_P_delay
+    )
+
+    log_marginal_likelihood_qt = torch.logsumexp(log_joint_prob_qtk, dim=2)
+
+    MEPLL_PropParams = log_marginal_likelihood_qt.sum()
+
+    return MEPLL_PropParams

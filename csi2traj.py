@@ -40,6 +40,6 @@ class CSItoTRAJ:
             )
 
     ##### --- Predicted Trajectory ---
-        print("at csi2traj.py: ", trajectory[0:10])
+        
 
         return trajectory

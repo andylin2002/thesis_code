@@ -4,10 +4,12 @@ import argparse
 from csi2traj import CSItoTRAJ
 
 CONFIG_PATH = 'config.yaml'
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=20)
+    parser.add_argument('--em_findPropParams_threshold', type=float, default=1e-2)
 
     args=parser.parse_args()
 
@@ -19,6 +21,7 @@ def main():
     
 ##### --- Put Hyperparameter into Config ---
     config['EM_MAX_ITER'] = args.em_max_iter
+    config['EM_M_STEP_TH'] = args.em_findPropParams_threshold
 
 ##### --- Reference Point Setup ---
     reference_grid, x_bounds, y_bounds = utils.generate_reference_grid(config)
@@ -31,11 +34,21 @@ def main():
         }
 
 ##### --- LOS/NLOS ration for each AP --- 
-    APs_LOS_ratio = torch.full((4, 100, 2), 0.5, dtype=torch.float32)
+
+    ap_data = config.get('ACCESS_POINTS', {})
+    Q = len(ap_data)
+    T = config['NUM_SAMPLE']
+
+    epsilon = 1e-6
+    random_noise = torch.rand(Q, T, 2, device=DEVICE) * epsilon
+
+    APs_LOS_ratio_symmetric = torch.full((Q, T, 2), 0.5, dtype=torch.float32, device=DEVICE)
+    APs_LOS_ratio = APs_LOS_ratio_symmetric + random_noise
+
     context['APs_LOS_ratio'] = APs_LOS_ratio
 
 ##### --- Dummy last_predicted_point ---
-    context['last_predicted_point'] = torch.zeros(1, 2, dtype=torch.float32)
+    context['last_predicted_point'] = torch.zeros(1, 2, dtype=torch.float32, device=DEVICE)
 
 ##### --- Implement CSItoTRAJ ---
     csi2traj_engine = CSItoTRAJ(config, reference_grid)
