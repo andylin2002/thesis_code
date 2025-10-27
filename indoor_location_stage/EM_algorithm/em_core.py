@@ -61,10 +61,6 @@ class EM_Algorithm:
             trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
         
         #"""
-
-        print(self.context['current_round'])
-        print(start_point)
-        print(trajectory)
         
         # 第一輪EM：x1選功率最大的AP位置
         # 第二輪EM：x1選上一輪EM的最後一個點
@@ -227,14 +223,22 @@ class EM_Algorithm:
         # delta會存t-1狀態（在[G, 0]）並用其算出t狀態（在[G, 1]），再將t狀態的結果存到t-1狀態（[G, 0] = [G, 1]）
         delta_g2 = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
 
+        # batch = G，所有 G 同步計算（TODO: 需要克服稀疏狀況）
         for t in range(T):
+            current_emission_log_prob = emission_probability_gt[:, t]
+
+            # 算出第 t 步的 delta、紀錄哪一個點（i）造成最大 delta
             if t == 0: 
-                delta_g2[:, 0] = emission_probability_gt[:, 0]
-                pass
+                delta_g2[:, 0] = current_emission_log_prob
+                
             if t > 0:
+                
                 pass
 
-            #更新 Candidate_Path
+            # delta推進一步
+            delta_g2[:, 0] = delta_g2[:, 1]
+
+            # 更新 Candidate_Path "concat(prev, i)"
 
             pass
 

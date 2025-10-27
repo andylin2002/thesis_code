@@ -59,7 +59,7 @@ def main():
 ##### --- Implement CSItoTRAJ ---
     csi2traj_engine = CSItoTRAJ(config, reference_grid)
 
-    for round in range(4):
+    for round in range(1):
         context['current_round'] = round
 
         trajectory = csi2traj_engine.run_csi2traj(context)
