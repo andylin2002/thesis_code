@@ -4,6 +4,12 @@ from torch.distributions import Normal
 
 TypeTrajectory = torch.Tensor
 
+#******************************************************************************#
+#******************************************************************************#
+#********************************************* --- findPropParams Step --- ****#
+#******************************************************************************#
+#******************************************************************************#
+
 def build_gaussian_distribution(mean: torch.Tensor, variance: torch.Tensor) -> Normal:
     
 ##### --- variance to standard deviation ---
@@ -56,9 +62,25 @@ def calculate_weighted_average(data_qt: torch.Tensor,
 
     return weighted_average
 
-# ----------------------------------------------------
-# --- Parameters Update ---
-# ----------------------------------------------------
+def select_initial_position(
+        config: Dict[str, Any], 
+        reference_grid: torch.Tensor, 
+        power_q: torch.Tensor, 
+        device: torch.device
+) -> torch.Tensor:
+    
+    strongest_power_ap_idx = torch.argmax(power_q).item() + 1
+    ap_key = f'AP_{strongest_power_ap_idx}'
+
+    strongest_power_ap_pos = config['ACCESS_POINTS'][ap_key]['LOCATION_M']
+
+    if not isinstance(strongest_power_ap_pos, torch.Tensor):
+        strongest_power_ap_pos = torch.tensor(strongest_power_ap_pos, dtype=torch.float32, device=device)
+
+    distances = torch.linalg.norm(reference_grid - strongest_power_ap_pos.unsqueeze(0).to(reference_grid.device), dim=1)
+    start_grid_idx = torch.argmin(distances).item()
+
+    return reference_grid[start_grid_idx]
 
 ###########################################
 ##### --- Power's mean & variance --- #####
@@ -131,7 +153,7 @@ def calculate_power_qk_var(
 
     power_qk_var = numerator / denominator.clamp(min=1e-10)
     
-    return power_qk_var
+    return power_qk_var + 1e-6
 
 ###########################################
 ##### --- Angle's mean & variance --- #####
@@ -183,7 +205,7 @@ def calculate_angle_k_var(
 
     angle_k_var = numerator / denominator.clamp(min=1e-10)
 
-    return angle_k_var
+    return angle_k_var + 1e-6
 
 ###########################################
 ##### --- Delay's mean & variance --- #####
@@ -224,7 +246,7 @@ def calculate_delay_k_var(
 
     delay_k_var = numerator / denominator.clamp(min=1e-10)
 
-    return delay_k_var
+    return delay_k_var + 1e-6
 
 ###########################################
 ##### --- Global & AP's LOS ratio --- #####
@@ -303,3 +325,60 @@ def calculate_MEPLL_PropParams(
     MEPLL_PropParams = log_marginal_likelihood_qt.sum()
 
     return MEPLL_PropParams
+
+#******************************************************************************#
+#******************************************************************************#
+#********************************************* --- findTrajectory Step --- ****#
+#******************************************************************************#
+#******************************************************************************#
+
+def get_neighbor_indices(
+        config: Dict[str, Any],
+        grid_index: int, 
+        device: torch.device
+    ) -> torch.Tensor:
+    
+    # 1. 從配置中獲取網格尺寸 W 和 H
+    W = config['X_WIDTH']  # 網格寬度 (列數)
+    H = config['Y_WIDTH']  # 網格高度 (行數)
+
+    # 2. 將一維索引轉換為二維座標 (row, col)
+    # 這裡的 row/col 是 long 類型，可以直接用於張量計算
+    current_row = grid_index // W
+    current_col = grid_index % W
+    
+    # 3. 預先計算所有可能的行偏移量和列偏移量 (3x3 = 9 種組合)
+    # 將標量 current_row, current_col 提升為 Tensor，以進行廣播運算
+    current_row_tensor = torch.tensor(current_row, dtype=torch.long, device=device)
+    current_col_tensor = torch.tensor(current_col, dtype=torch.long, device=device)
+
+    # 偏移量矩陣 (已在 DEVICE 上)
+    delta_row = torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.long, device=device)
+    delta_col = torch.tensor([-1, 0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.long, device=device)
+    
+    # 4. 計算所有 9 個候選點的 (row, col)
+    next_row_candidates = current_row_tensor + delta_row
+    next_col_candidates = current_col_tensor + delta_col
+    
+    # 5. 邊界檢查 (使用掩碼)
+    mask_row_valid = (next_row_candidates >= 0) & (next_row_candidates < H)
+    mask_col_valid = (next_col_candidates >= 0) & (next_col_candidates < W)
+    valid_mask = mask_row_valid & mask_col_valid
+    
+    # 6. 過濾出有效的 (row, col) 並轉換回一維索引
+    valid_rows = next_row_candidates[valid_mask]
+    valid_cols = next_col_candidates[valid_mask]
+    
+    # W 是 Python int，可以直接用於乘法
+    neighbor_indices = valid_rows * W + valid_cols
+    
+    return neighbor_indices
+
+def calculate_emission_probability(
+        feature_matrix: torch.Tensor, 
+        config: Dict[str, Any], 
+        reference_grid: torch.Tensor,
+        propagation_params: Dict[str, Any]
+) -> torch.Tensor:
+
+    pass

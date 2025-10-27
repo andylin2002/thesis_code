@@ -9,7 +9,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=20)
-    parser.add_argument('--em_findPropParams_threshold', type=float, default=1e-2)
+    parser.add_argument('--findPropParams_try', type=float, default=10)
 
     args=parser.parse_args()
 
@@ -19,12 +19,18 @@ def main():
         print("Configuration loading failed.")
         return
     
+##### --- Reference Point Setup ---
+    reference_grid, x_bounds, y_bounds, x_width, y_width = utils.generate_reference_grid(config)
+    
 ##### --- Put Hyperparameter into Config ---
     config['EM_MAX_ITER'] = args.em_max_iter
-    config['EM_M_STEP_TH'] = args.em_findPropParams_threshold
+    config['EM_M_STEP_TRY'] = args.findPropParams_try
+    
+    config['X_BOUNDS'] = x_bounds
+    config['Y_BOUNDS'] = y_bounds
+    config['X_WIDTH'] = x_width
+    config['Y_WIDTH'] = y_width
 
-##### --- Reference Point Setup ---
-    reference_grid, x_bounds, y_bounds = utils.generate_reference_grid(config)
 
 ##### --- Dynamic parameters ---
     context = {
@@ -53,7 +59,7 @@ def main():
 ##### --- Implement CSItoTRAJ ---
     csi2traj_engine = CSItoTRAJ(config, reference_grid)
 
-    for round in range(1):
+    for round in range(4):
         context['current_round'] = round
 
         trajectory = csi2traj_engine.run_csi2traj(context)

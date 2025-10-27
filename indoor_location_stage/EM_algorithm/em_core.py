@@ -1,14 +1,15 @@
-from typing import Dict, Any, Optional
+from typing import List, Dict, Any, Optional
 import torch
 
 from . import em_calculator as emc
+from markov_model.uniform_markov import generate_uniform_markov_trajectory
 
 TypeTrajectory = torch.Tensor
 TypePropParams = Dict[str,torch.Tensor]
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# (TODO)
+# (TODO : 需要解決MEPLL震盪導致無法收斂的狀況)
 class EM_Algorithm:
     def __init__(
             self, 
@@ -46,7 +47,25 @@ class EM_Algorithm:
     
     def _initialize_Trajectory(self) -> Optional[TypeTrajectory]:
         
-        trajectory = torch.zeros(self.num_sample, 2, dtype=torch.float32, device=DEVICE) # (TODO: add transformer)
+        #trajectory = torch.zeros(self.num_sample, 2, dtype=torch.float32, device=DEVICE) # (TODO: add transformer)
+
+        #"""
+        # (FIXME)
+        if self.context['current_round'] == 0: # Fisrt round
+            power_q = self.feature_matrix[:, 0, 0]
+            start_point = emc.select_initial_position(self.config, self.reference_grid, power_q, DEVICE)
+            trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
+
+        else: # Not the fisrt round
+            start_point = self.context['last_predicted_point']
+            trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
+        
+        #"""
+
+        print(self.context['current_round'])
+        print(start_point)
+        print(trajectory)
+        
         # 第一輪EM：x1選功率最大的AP位置
         # 第二輪EM：x1選上一輪EM的最後一個點
         # 後面x2~xT都用Transformer直接推論
@@ -79,10 +98,6 @@ class EM_Algorithm:
         return propagation_params
     
     def _findPropParams_step(self): # (TODO)
-        
-        T = self.num_sample
-        Q = self.num_ap
-        K = 2 # LOS and NLOS
 
         trajectory = self.trajectory
         propagation_params = self.propagation_params
@@ -94,6 +109,10 @@ class EM_Algorithm:
         
         
     ##### --- Initialize ---
+        T = self.num_sample
+        Q = self.num_ap
+        K = 2 # LOS and NLOS
+
         gamma_qtk = self.context['APs_LOS_ratio']
         L_qt = emc.calculate_L_tq(config, trajectory, Q)
 
@@ -102,6 +121,7 @@ class EM_Algorithm:
 
     ##### --- Maximize 'Marginal Emission Probability Log Likelihood' until converge ---
         MAX_MEPLL_PropParams = -torch.inf
+        try_count = config['EM_M_STEP_TRY']
 
         while True:
             power_qk_average = emc.calculate_weighted_average(power_qt, gamma_qtk)
@@ -163,18 +183,62 @@ class EM_Algorithm:
                                                               gamma_qtk)
 
         ##### --- Check Whether 'findPropParams_step' is convergent ---
-            MEPLL_difference = MEPLL_PropParams - MAX_MEPLL_PropParams
-
-            if MEPLL_difference > 0:
+            if MEPLL_PropParams > MAX_MEPLL_PropParams:
                 MAX_MEPLL_PropParams = MEPLL_PropParams
+                try_count = config['EM_M_STEP_TRY']
+                continue
 
-            if torch.abs(MEPLL_difference) < config['EM_M_STEP_TH']:
+            if try_count == 0:
                 break
+
+            try_count -= 1
 
     ##### --- Update AP's LOS ratio ---
         self.context['APs_LOS_ratio'].copy_(gamma_qtk)
+
+    ##### --- Found Local Limit Point of Parameters ---
+        self.propagation_params = propagation_params
         
     def _findTrajectory_step(self): # (TODO)
+
+        trajectory = self.trajectory  
+        config = self.config
+        reference_grid = self.reference_grid
+
+        T = self.num_sample
+        Q = self.num_ap
+        K = 2 # LOS and NLOS
+        G = self.reference_grid.shape[0]
+
+    ##### --- Fisrt: Construct G * T Emission Probability ---
+
+        # (TODO: calculate_emission_probability in emc)
+        emission_probability_gt = emc.calculate_emission_probability(self.feature_matrix, 
+                                                                     self. config, 
+                                                                     self.reference_grid, 
+                                                                     self.propagation_params)
+
+    ##### --- Second: Implement Vertebi Algorithm ---
+        Candidate_Path: List[torch.Tensor] = [
+            torch.empty(0, 2, dtype=torch.float32, device=DEVICE) 
+            for _ in range(G)
+        ]
+
+        # delta會存t-1狀態（在[G, 0]）並用其算出t狀態（在[G, 1]），再將t狀態的結果存到t-1狀態（[G, 0] = [G, 1]）
+        delta_g2 = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
+
+        for t in range(T):
+            if t == 0: 
+                delta_g2[:, 0] = emission_probability_gt[:, 0]
+                pass
+            if t > 0:
+                pass
+
+            #更新 Candidate_Path
+
+            pass
+
+            
 
         pass
         

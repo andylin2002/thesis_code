@@ -27,13 +27,6 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[
     """
     Calculates the boundary of the localization area and generates
     a uniform grid of prediction points based on AP locations.
-
-    Returns:
-        tuple: (grid_points, x_limits, y_limits, ap_locations_array) 
-               grid_points: Array of grid coordinates (N_points, 2).
-               x_limits: [x_min, x_max] boundary.
-               y_limits: [y_min, y_max] boundary.
-               ap_locations_array: Array of AP coordinates (N_AP, 2).
     """
     # 1. Extract AP coordinates from config
     ap_locations_list = []
@@ -46,7 +39,7 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[
             
     if not ap_locations_list:
         print("Warning: No valid AP coordinates found. Cannot generate grid.")
-        return np.array([]), [0.0, 0.0], [0.0, 0.0], np.array([]) 
+        return np.array([]), [0.0, 0.0], [0.0, 0.0]
 
     ap_locations_array = np.array(ap_locations_list)
     
@@ -82,6 +75,10 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[
     x_coords = np.arange(x_min, x_max + resolution, resolution)
     y_coords = np.arange(y_min, y_max + resolution, resolution)
     
+    # Calculate grid dimensions W (Width) and H (Height)
+    W = len(x_coords)
+    H = len(y_coords)
+
     # Create the meshgrid and flatten to N_points x 2 array
     X, Y = np.meshgrid(x_coords, y_coords)
     grid_points = np.vstack([X.ravel(), Y.ravel()]).T
@@ -91,9 +88,11 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[
     print(f"X Bounds: [{x_min:.2f}, {x_max:.2f}] m")
     print(f"Y Bounds: [{y_min:.2f}, {y_max:.2f}] m")
     print(f"Grid Resolution: {resolution} m")
+    print(f"Grid Dimensions (W x H): {W} x {H}")
     print(f"Total Reference Points: {grid_points.shape[0]}")
     
-    return grid_points_tensor, x_limits, y_limits
+    # The function signature (Return type) only includes grid_points_tensor, x_limits, y_limits
+    return grid_points_tensor, x_limits, y_limits, W, H
 
 def visualize_grid_and_aps(grid_points: np.ndarray, ap_locations: np.ndarray, x_bounds: List[float], y_bounds: List[float]):
     """
