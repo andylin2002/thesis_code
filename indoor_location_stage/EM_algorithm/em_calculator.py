@@ -332,45 +332,64 @@ def calculate_MEPLL_PropParams(
 #******************************************************************************#
 #******************************************************************************#
 
-def get_neighbor_indices(
-        config: Dict[str, Any],
-        grid_index: int, 
-        device: torch.device
-    ) -> torch.Tensor:
+import torch
+from typing import Dict, Any
+
+def get_all_neighbor_indices(
+    config: Dict[str, Any],
+    grid_indices_G: torch.Tensor, # <--- 接受形狀為 [G] 的張量
+    device: torch.device
+) -> torch.Tensor:
+    """
+    向量化版本：輸入 G 個網格索引 (形狀 [G])，輸出 G 個點各自的 9 個鄰近點索引 (形狀 [G, 9])。
+    
+    無效的鄰近點會用 -1 填充。
+    """
     
     # 1. 從配置中獲取網格尺寸 W 和 H
     W = config['X_WIDTH']  # 網格寬度 (列數)
     H = config['Y_WIDTH']  # 網格高度 (行數)
-
-    # 2. 將一維索引轉換為二維座標 (row, col)
-    # 這裡的 row/col 是 long 類型，可以直接用於張量計算
-    current_row = grid_index // W
-    current_col = grid_index % W
+    G = grid_indices_G.shape[0] # 輸入點的數量
     
-    # 3. 預先計算所有可能的行偏移量和列偏移量 (3x3 = 9 種組合)
-    # 將標量 current_row, current_col 提升為 Tensor，以進行廣播運算
-    current_row_tensor = torch.tensor(current_row, dtype=torch.long, device=device)
-    current_col_tensor = torch.tensor(current_col, dtype=torch.long, device=device)
-
-    # 偏移量矩陣 (已在 DEVICE 上)
-    delta_row = torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.long, device=device)
-    delta_col = torch.tensor([-1, 0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.long, device=device)
+    # 2. 將一維索引 [G] 轉換為二維座標 [G, 1]
+    # grid_indices_G 必須是 long 類型
+    grid_indices_G = grid_indices_G.long() 
     
-    # 4. 計算所有 9 個候選點的 (row, col)
-    next_row_candidates = current_row_tensor + delta_row
-    next_col_candidates = current_col_tensor + delta_col
+    # [G] -> [G, 1]
+    current_rows_G = (grid_indices_G // W).unsqueeze(1) 
+    current_cols_G = (grid_indices_G % W).unsqueeze(1)
     
-    # 5. 邊界檢查 (使用掩碼)
-    mask_row_valid = (next_row_candidates >= 0) & (next_row_candidates < H)
-    mask_col_valid = (next_col_candidates >= 0) & (next_col_candidates < W)
-    valid_mask = mask_row_valid & mask_col_valid
+    # 3. 預先計算偏移量張量
+    # 偏移量矩陣 (3x3 = 9 種組合)，形狀 [1, 9]
+    delta_row_1_9 = torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.long, device=device).unsqueeze(0)
+    delta_col_1_9 = torch.tensor([-1, 0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.long, device=device).unsqueeze(0)
     
-    # 6. 過濾出有效的 (row, col) 並轉換回一維索引
-    valid_rows = next_row_candidates[valid_mask]
-    valid_cols = next_col_candidates[valid_mask]
+    # 4. 廣播運算計算所有 G * 9 個候選點的 (row, col)
+    # [G, 1] + [1, 9] -> [G, 9]
     
+    # 候選行座標 [G, 9]
+    candidate_rows_G_9 = current_rows_G + delta_row_1_9
+    # 候選列座標 [G, 9]
+    candidate_cols_G_9 = current_cols_G + delta_col_1_9
+    
+    # 5. 邊界檢查 (使用掩碼)，形狀 [G, 9]
+    mask_row_valid = (candidate_rows_G_9 >= 0) & (candidate_rows_G_9 < H)
+    mask_col_valid = (candidate_cols_G_9 >= 0) & (candidate_cols_G_9 < W)
+    valid_mask_G_9 = mask_row_valid & mask_col_valid
+    
+    # 6. 將有效的 (row, col) 轉換回一維索引 [G, 9]
+    
+    # 計算所有 9 個候選點的一維索引 (包含邊界外的值)
     # W 是 Python int，可以直接用於乘法
-    neighbor_indices = valid_rows * W + valid_cols
+    all_candidate_indices_G_9 = candidate_rows_G_9 * W + candidate_cols_G_9
+    
+    # 7. 應用掩碼：無效的點設定為 -1
+    # 創建一個填充了 -1 的張量作為基礎
+    neighbor_indices = torch.full((G, 9), -1, dtype=torch.long, device=device)
+    
+    # 將所有有效索引放入結果張量中
+    # 這裡我們使用 where 或直接的索引替換
+    neighbor_indices[valid_mask_G_9] = all_candidate_indices_G_9[valid_mask_G_9]
     
     return neighbor_indices
 
@@ -380,5 +399,28 @@ def calculate_emission_probability(
         reference_grid: torch.Tensor,
         propagation_params: Dict[str, Any]
 ) -> torch.Tensor:
+
+    pass
+
+def calcultate_delta_info(
+    t: int, 
+    ref_index: int, 
+    tgt_index: int, 
+    G_neighbor_index_matrix: torch.Tensor, 
+    delta: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    
+    pass
+
+def update_delta_and_path(
+    t: int, 
+    ref_index: int, 
+    tgt_index: int, 
+    delta: torch.Tensor, 
+    path: torch.Tensor, 
+    G_winner_neighbor_index: torch.Tensor, 
+    max_value: torch.Tensor,
+    current_emission_log_prob: torch.Tensor
+):
 
     pass

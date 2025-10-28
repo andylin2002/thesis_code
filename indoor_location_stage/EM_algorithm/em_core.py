@@ -197,7 +197,6 @@ class EM_Algorithm:
         
     def _findTrajectory_step(self): # (TODO)
 
-        trajectory = self.trajectory  
         config = self.config
         reference_grid = self.reference_grid
 
@@ -210,41 +209,39 @@ class EM_Algorithm:
 
         # (TODO: calculate_emission_probability in emc)
         emission_probability_gt = emc.calculate_emission_probability(self.feature_matrix, 
-                                                                     self. config, 
+                                                                     self.config, 
                                                                      self.reference_grid, 
                                                                      self.propagation_params)
 
-    ##### --- Second: Implement Vertebi Algorithm ---
-        Candidate_Path: List[torch.Tensor] = [
-            torch.empty(0, 2, dtype=torch.float32, device=DEVICE) 
-            for _ in range(G)
-        ]
+    ##### --- Second: PingPong Update ---
+        G_index = torch.arange(G).to(DEVICE)
+        G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
         # delta會存t-1狀態（在[G, 0]）並用其算出t狀態（在[G, 1]），再將t狀態的結果存到t-1狀態（[G, 0] = [G, 1]）
-        delta_g2 = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
+        delta = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
+        path = torch.full((G, T, 2), -1, dtype=torch.long, device=DEVICE)
+
+        delta[:, 0] = emission_probability_gt[:, 0]
+        path[:, -1, :] = G_index
 
         # batch = G，所有 G 同步計算（TODO: 需要克服稀疏狀況）
-        for t in range(T):
+        for t in range(1, T):
+            # Ping-Pong Structure
+            ref_index = (t + 1) % 2
+            tgt_index = t % 2
+
             current_emission_log_prob = emission_probability_gt[:, t]
 
-            # 算出第 t 步的 delta、紀錄哪一個點（i）造成最大 delta
-            if t == 0: 
-                delta_g2[:, 0] = current_emission_log_prob
-                
-            if t > 0:
-                
-                pass
+            # (TODO: update delta[:, 0 or 1] and candidate_path[:, :, 0 or 1])
+            G_winner_neighbor_index, max_value = emc.calcultate_delta_info(t, ref_index, tgt_index, G_neighbor_index_matrix, delta)
+            # (TODO: update using G_winner_neighbor_index and max_value)
+            emc.update_delta_and_path(t, ref_index, tgt_index, delta, path, G_winner_neighbor_index, max_value, current_emission_log_prob)
 
-            # delta推進一步
-            delta_g2[:, 0] = delta_g2[:, 1]
+            if t == (T - 1):
+                chosen_index = torch.argmax(delta[:, tgt_index])
+                trajectory_index_sequence = path[chosen_index, :, tgt_index]
+                self.trajectory = reference_grid[trajectory_index_sequence]
 
-            # 更新 Candidate_Path "concat(prev, i)"
-
-            pass
-
-            
-
-        pass
         
     def _check_convergence(self): # (TODO)
         
