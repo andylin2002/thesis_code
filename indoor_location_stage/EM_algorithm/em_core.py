@@ -29,7 +29,13 @@ class EM_Algorithm:
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']
 
+        self.ap_locations = emc.get_ap_locations(self.config, self.num_ap, DEVICE)
+
     ##### --- Initialization ---
+        self.MEPLL_PropParams = -torch.inf
+        self.MEPLL_Trajectory = -torch.inf
+        self.MEPLL_record = -torch.inf
+
         self.trajectory = self._initialize_Trajectory()
         self.propagation_params = self._initialize_PropParams()
 
@@ -103,23 +109,24 @@ class EM_Algorithm:
         angle_qt = self.feature_matrix[:, :, 1]
         delay_qt = self.feature_matrix[:, :, 2]
         
-        
     ##### --- Initialize ---
         T = self.num_sample
         Q = self.num_ap
         K = 2 # LOS and NLOS
 
         gamma_qtk = self.context['APs_LOS_ratio']
-        L_qt = emc.calculate_L_tq(config, trajectory, Q)
+        L_qt = emc.calculate_L_tq(trajectory, self.ap_locations)
 
-        angle_qt_mean = emc.calculate_angle_qt_mean(config, trajectory, Q)
+        angle_qt_mean = emc.calculate_angle_qt_mean(trajectory, self.ap_locations)
         angle_qtk_mean = angle_qt_mean.unsqueeze(2)
 
     ##### --- Maximize 'Marginal Emission Probability Log Likelihood' until converge ---
         MAX_MEPLL_PropParams = -torch.inf
-        try_count = config['EM_M_STEP_TRY']
 
         while True:
+            propagation_params_old = {k: v.clone() for k, v in propagation_params.items()}
+            gamma_qtk_old = gamma_qtk.clone()
+
             power_qk_average = emc.calculate_weighted_average(power_qt, gamma_qtk)
             L_qk_average =     emc.calculate_weighted_average(L_qt, gamma_qtk)
 
@@ -160,7 +167,7 @@ class EM_Algorithm:
             propagation_params['pi_global_LOS_ratio'] = emc.calculate_pi(gamma_qtk)
 
         ##### --- Parameters Update related to AP's LOS ratio ---
-            gamma_qtk = emc.calculate_gamma_qtk(propagation_params['pi_global_LOS_ratio'], 
+            gamma_qtk_new = emc.calculate_gamma_qtk(propagation_params['pi_global_LOS_ratio'], 
                                                 power_distribution_qtk, 
                                                 angle_distribution_qtk, 
                                                 delay_distribution_qtk, 
@@ -169,62 +176,69 @@ class EM_Algorithm:
                                                 delay_qt)
 
         ##### --- Calculate 'Marginal Emission Probability Log Likelihood' for PropParams ---
-            MEPLL_PropParams = emc.calculate_MEPLL_PropParams(propagation_params['pi_global_LOS_ratio'], 
+            MEPLL_PropParams_new = emc.calculate_MEPLL_PropParams(propagation_params['pi_global_LOS_ratio'], 
                                                               power_distribution_qtk, 
                                                               angle_distribution_qtk, 
                                                               delay_distribution_qtk, 
                                                               power_qt, 
                                                               angle_qt, 
                                                               delay_qt, 
-                                                              gamma_qtk)
+                                                              gamma_qtk_new)
 
         ##### --- Check Whether 'findPropParams_step' is convergent ---
-            if MEPLL_PropParams > MAX_MEPLL_PropParams:
-                MAX_MEPLL_PropParams = MEPLL_PropParams
-                try_count = config['EM_M_STEP_TRY']
+            if MEPLL_PropParams_new > MAX_MEPLL_PropParams + 1e-6:
+                MAX_MEPLL_PropParams = MEPLL_PropParams_new
+                gamma_qtk = gamma_qtk_new
                 continue
-
-            if try_count == 0:
+            else:
+                self.propagation_params = propagation_params_old 
+                gamma_qtk = gamma_qtk_old
                 break
 
-            try_count -= 1
+        # END while
 
     ##### --- Update AP's LOS ratio ---
         self.context['APs_LOS_ratio'].copy_(gamma_qtk)
 
     ##### --- Found Local Limit Point of Parameters ---
         self.propagation_params = propagation_params
+    ##### --- Record best MEPLL_PropParams ---
+        self.MEPLL_PropParams = MAX_MEPLL_PropParams
         
     def _findTrajectory_step(self): # (TODO)
 
+        feature_matrix = self.feature_matrix
         config = self.config
         reference_grid = self.reference_grid
+        propagation_params = self.propagation_params
+        ap_locations = self.ap_locations
 
         T = self.num_sample
         Q = self.num_ap
         K = 2 # LOS and NLOS
         G = self.reference_grid.shape[0]
 
-    ##### --- Fisrt: Construct G * T Emission Probability ---
+    ##### --- Fisrt: Construct G * T Emission Probability step ---
 
         # (TODO: calculate_emission_probability in emc)
-        emission_probability_gt = emc.calculate_emission_probability(self.feature_matrix, 
-                                                                     self.config, 
-                                                                     self.reference_grid, 
-                                                                     self.propagation_params)
+        emission_probability_gt = emc.calculate_emission_probability(feature_matrix,
+                                                                     reference_grid, 
+                                                                     propagation_params,
+                                                                     ap_locations, 
+                                                                     DEVICE)
 
-    ##### --- Second: PingPong Update ---
+    ##### --- Second: PingPong Updating step ---
         G_index = torch.arange(G).to(DEVICE)
         G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
-        # delta會存t-1狀態（在[G, 0]）並用其算出t狀態（在[G, 1]），再將t狀態的結果存到t-1狀態（[G, 0] = [G, 1]）
         delta = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
         path = torch.full((G, T, 2), -1, dtype=torch.long, device=DEVICE)
 
         delta[:, 0] = emission_probability_gt[:, 0]
-        path[:, -1, :] = G_index
 
-        # batch = G，所有 G 同步計算（TODO: 需要克服稀疏狀況）
+        G_index_stacked = torch.stack([G_index, G_index], dim=1)
+        path[:, -1, :] = G_index_stacked
+
         for t in range(1, T):
             # Ping-Pong Structure
             ref_index = (t + 1) % 2
@@ -232,17 +246,29 @@ class EM_Algorithm:
 
             current_emission_log_prob = emission_probability_gt[:, t]
 
-            # (TODO: update delta[:, 0 or 1] and candidate_path[:, :, 0 or 1])
-            G_winner_neighbor_index, max_value = emc.calcultate_delta_info(t, ref_index, tgt_index, G_neighbor_index_matrix, delta)
-            # (TODO: update using G_winner_neighbor_index and max_value)
-            emc.update_delta_and_path(t, ref_index, tgt_index, delta, path, G_winner_neighbor_index, max_value, current_emission_log_prob)
+            G_winner_neighbor_index, max_value = emc.get_winner_neighbor_info(ref_index, G_neighbor_index_matrix, delta)
+            delta, path = emc.update_delta_and_path(t, ref_index, tgt_index, delta, path, G_winner_neighbor_index, max_value, current_emission_log_prob)
 
             if t == (T - 1):
-                chosen_index = torch.argmax(delta[:, tgt_index])
+                MEPLL_Trajectory, chosen_index = torch.max(delta[:, tgt_index], dim=0)
                 trajectory_index_sequence = path[chosen_index, :, tgt_index]
                 self.trajectory = reference_grid[trajectory_index_sequence]
 
+        self.MEPLL_Trajectory = MEPLL_Trajectory
+
         
-    def _check_convergence(self): # (TODO)
+    def _check_convergence(self):
+
+        current_MEPLL = self.MEPLL_PropParams + self.MEPLL_Trajectory
+    
+        diff = abs(self.MEPLL_record - current_MEPLL)
+
+        if diff < 1e-6:
+            convergence = True
+            
+        else:
+            convergence = False
+
+        self.MEPLL_record = current_MEPLL
         
-        return False
+        return convergence

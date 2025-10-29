@@ -131,14 +131,20 @@ def visualize_grid_and_aps(grid_points: np.ndarray, ap_locations: np.ndarray, x_
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.show()
 
-def load_raw_csi(path):
+def load_raw_csi(path, config):
     """Loads the integrated complex CSI data from a .npy file."""
+    Q = len(config.get('ACCESS_POINTS', {}))
+    T = config['NUM_SAMPLE']
+    P = config['NUM_PACKET']
+    N = config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS']
+    M = config['CSI_DIMENSIONS']['NUM_SUBCARRIERS']
+
     try:
         complex_csi = np.load(path)
         
-        if complex_csi.shape != (4, 1500, 3, 30) or complex_csi.dtype != np.complex64:
+        if complex_csi.shape != (Q, (T * P), N, M) or complex_csi.dtype != np.complex64:
             print(f"Error: Data shape or dtype mismatch in {path}.")
-            print(f"Expected (1500, 4, 3, 30) and complex64, got {complex_csi.shape} and {complex_csi.dtype}.")
+            print(f"Expected ({T*P}, {Q}, {N}, {M}) and complex64, got {complex_csi.shape} and {complex_csi.dtype}.")
             return None
             
         return complex_csi

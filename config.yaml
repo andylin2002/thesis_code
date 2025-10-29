@@ -45,5 +45,5 @@ CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                   # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 100                           # notation: T
-NUM_PACKET: 15                            # notation: P
+NUM_SAMPLE: 15                           # notation: T
+NUM_PACKET: 100                            # notation: P

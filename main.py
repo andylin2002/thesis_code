@@ -8,8 +8,8 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
-    parser.add_argument('--em_max_iter', type=int, default=20)
-    parser.add_argument('--findPropParams_try', type=float, default=10)
+    parser.add_argument('--em_max_iter', type=int, default=30)
+    parser.add_argument('--round', type=int, default=10)
 
     args=parser.parse_args()
 
@@ -24,7 +24,7 @@ def main():
     
 ##### --- Put Hyperparameter into Config ---
     config['EM_MAX_ITER'] = args.em_max_iter
-    config['EM_M_STEP_TRY'] = args.findPropParams_try
+    config['ROUND'] = args.round
     
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
@@ -59,7 +59,7 @@ def main():
 ##### --- Implement CSItoTRAJ ---
     csi2traj_engine = CSItoTRAJ(config, reference_grid)
 
-    for round in range(1):
+    for round in range(config['ROUND']):
         context['current_round'] = round
 
         trajectory = csi2traj_engine.run_csi2traj(context)

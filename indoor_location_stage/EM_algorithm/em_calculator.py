@@ -4,6 +4,23 @@ from torch.distributions import Normal
 
 TypeTrajectory = torch.Tensor
 
+def get_ap_locations(config: Dict[str, Any], Q: int, device: torch.Tensor) -> torch.Tensor:
+
+    DEVICE = device
+
+    ap_locations_list = []
+    for ap_id in range(1, Q + 1):
+        ap_key = f"AP_{ap_id}"
+        if ap_key in config['ACCESS_POINTS']:
+            ap_locations_list.append(config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
+        else:
+            raise ValueError(f"Missing location data for AP ID {ap_id}")
+        
+    ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=DEVICE)
+
+    return ap_locations
+
+
 #******************************************************************************#
 #******************************************************************************#
 #********************************************* --- findPropParams Step --- ****#
@@ -22,21 +39,12 @@ def build_gaussian_distribution(mean: torch.Tensor, variance: torch.Tensor) -> N
     return gaussian_dist
 
 def calculate_L_tq(
-        config: Dict[str, Any], 
         trajectory: TypeTrajectory, 
-        Q: int
+        ap_locations: torch.Tensor, 
     ) -> torch.Tensor:
 
     ##### --- Prepare AP's position and trajectory ---
-        ap_locations_list = []
-        for ap_id in range(1, Q + 1):
-            ap_key = f"AP_{ap_id}"
-            if ap_key in config['ACCESS_POINTS']:
-                ap_locations_list.append(config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
-            else:
-                raise ValueError(f"Missing location data for AP ID {ap_id}")
-            
-        ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=trajectory.device)
+        
         ap_locations_expanded = ap_locations.unsqueeze(1)
         trajectory_expanded = trajectory.unsqueeze(0)
 
@@ -160,21 +168,10 @@ def calculate_power_qk_var(
 ###########################################
 
 def calculate_angle_qt_mean(
-        config: Dict[str, Any], 
         trajectory: TypeTrajectory, 
-        Q: int  
+        ap_locations: torch.Tensor,   
     ) -> torch.Tensor:
 
-##### --- Prepare AP's position and trajectory ---
-    ap_locations_list = []
-    for ap_id in range(1, Q + 1):
-        ap_key = f"AP_{ap_id}"
-        if ap_key in config['ACCESS_POINTS']:
-            ap_locations_list.append(config['ACCESS_POINTS'][ap_key]['LOCATION_M'])
-        else:
-            raise ValueError(f"Missing location data for AP ID {ap_id}")
-        
-    ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=trajectory.device)
     ap_locations_expanded = ap_locations.unsqueeze(1)
     trajectory_expanded = trajectory.unsqueeze(0)
 
@@ -393,24 +390,178 @@ def get_all_neighbor_indices(
     
     return neighbor_indices
 
+###########################################
+##### --- Emission Probability GT --- #####
+###########################################
+
+# (TODO: check if the function is right)
 def calculate_emission_probability(
         feature_matrix: torch.Tensor, 
-        config: Dict[str, Any], 
         reference_grid: torch.Tensor,
-        propagation_params: Dict[str, Any]
+        propagation_params: Dict[str, Any], 
+        ap_locations: torch.Tensor, 
+        device: torch.device
 ) -> torch.Tensor:
+    
+    # Extract Power, Angle, Delay observations (Q, T)
+    power_qt = feature_matrix[:, :, 0] 
+    angle_qt = feature_matrix[:, :, 1] 
+    delay_qt = feature_matrix[:, :, 2] 
+    
+    G = reference_grid.shape[0] # Number of grid points
+    Q, T = power_qt.shape       # Number of APs, Number of time steps
+    K = 2                       # Number of states (LOS/NLOS)
+    DEVICE = device
+    
+    # --- Parameter Preparation and Reshaping ---
+    # (Q, K) -> (1, Q, 1, K) for broadcasting
+    alpha_1q1k = propagation_params['alpha_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
+    beta_1q1k  = propagation_params['beta_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
+    power_var_1q1k = propagation_params['power_qk_var'].to(DEVICE).unsqueeze(0).unsqueeze(2)
 
-    pass
+    # (K) -> (1, 1, 1, K) for broadcasting
+    angle_var_111k = propagation_params['angle_k_var'].to(DEVICE).view(1, 1, 1, K)
+    delay_mean_111k = propagation_params['delay_k_mean'].to(DEVICE).view(1, 1, 1, K)
+    delay_var_111k = propagation_params['delay_k_var'].to(DEVICE).view(1, 1, 1, K)
+    
+    # --- Grid Distance (L_gq) and Angle Mean Calculation ---
+    # Calculate log10(Distance) for each grid point g to each AP q, shape (G, Q)
+    L_gq = calculate_L_gq(reference_grid, ap_locations).to(DEVICE)
+    # Reshape for broadcasting to (G, Q, 1, 1)
+    L_gq11 = L_gq.unsqueeze(2).unsqueeze(3)
 
-def calcultate_delta_info(
-    t: int, 
+    # Calculate geometric angle mean for each grid point g to each AP q, shape (G, Q)
+    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations).to(DEVICE)
+    # Reshape for broadcasting to (G, Q, 1, 1)
+    angle_gq11_mean = angle_gq_mean.unsqueeze(2).unsqueeze(3)
+    
+    # --- Feature Mean and Variance Calculation (Broadcasted) ---
+    
+    # --- Power ---
+    # Power Mean (G, Q, 1, K) = beta_qk - (alpha_qk * log10(L_gq)) (Log-distance model)
+    power_gq1k_mean = beta_1q1k - (alpha_1q1k * L_gq11) 
+    # Power Mean (G, Q, T, K) - Expand over T dimension
+    power_gqtk_mean = power_gq1k_mean.expand(G, Q, T, K) 
+    # Power Var (G, Q, T, K) - Expand over T dimension
+    power_gqtk_var = power_var_1q1k.expand(G, Q, T, K)
+
+    # --- Angle ---
+    # Angle Mean (G, Q, T, K) - Expand over T and K dimensions
+    angle_gqtk_mean = angle_gq11_mean.expand(G, Q, T, K)
+    # Angle Var (G, Q, T, K) - Expand over G, Q, T dimensions
+    angle_gqtk_var = angle_var_111k.expand(G, Q, T, K)
+
+    # --- Delay ---
+    # Delay Mean (G, Q, T, K) - Expand over G, Q, T dimensions
+    delay_gqtk_mean = delay_mean_111k.expand(G, Q, T, K)
+    # Delay Var (G, Q, T, K) - Expand over G, Q, T dimensions
+    delay_gqtk_var = delay_var_111k.expand(G, Q, T, K)
+
+    # --- Reshape Observations for Broadcasting ---
+    # Observations (Q, T) -> (1, Q, T, 1) -> (G, Q, T, K)
+    power_gqtk = power_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
+    angle_gqtk = angle_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
+    delay_gqtk = delay_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
+    
+    # --- Calculate Log PDF for each feature (G, Q, T, K) ---
+    log_P_power_gqtk = gaussian_log_pdf(power_gqtk, power_gqtk_mean, power_gqtk_var)
+    log_P_angle_gqtk = gaussian_log_pdf(angle_gqtk, angle_gqtk_mean, angle_gqtk_var)
+    log_P_delay_gqtk = gaussian_log_pdf(delay_gqtk, delay_gqtk_mean, delay_gqtk_var)
+
+    # --- Incorporate Global LOS Prior $\pi_k$ ---
+    # (K) -> (1, 1, 1, K) -> (G, Q, T, K)
+    pi_k = propagation_params['pi_global_LOS_ratio'].to(DEVICE)
+    log_pi_k_111k = torch.log(pi_k.clamp(min=1e-10)).view(1, 1, 1, K)
+    log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
+
+    # Emission Probability
+    log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
+    log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
+    emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
+
+    return emission_log_prob_gt
+
+def calculate_angle_gq_mean(
+        reference_grid: torch.Tensor, # Shape (G, 2)
+        ap_locations: torch.Tensor, 
+) -> torch.Tensor:
+    
+    ap_locations_expanded = ap_locations.unsqueeze(0)     # (1, Q, 2)
+    grid_expanded = reference_grid.unsqueeze(1)           # (G, 1, 2)
+
+    vector_V_gq = ap_locations_expanded - grid_expanded
+    x_diff = vector_V_gq[..., 0]
+    y_diff = vector_V_gq[..., 1]
+
+    angle_rad_gq = torch.atan2(y_diff, x_diff)
+    angle_deg_gq = torch.rad2deg(angle_rad_gq)
+
+    angle_gq_mean = angle_deg_gq
+
+    return angle_gq_mean
+
+def calculate_L_gq(
+        reference_grid: torch.Tensor, 
+        ap_locations: torch.Tensor, 
+) -> torch.Tensor:
+    
+    ap_locations_expanded = ap_locations.unsqueeze(0)     # (1, Q, 2)
+    grid_expanded = reference_grid.unsqueeze(1)           # (G, 1, 2)
+
+    squared_diff = (ap_locations_expanded - grid_expanded) ** 2
+    distance_matrix = torch.sqrt(squared_diff.sum(dim=2))
+    distance_matrix = torch.clamp(distance_matrix, min=1e-10)
+    L_gq = torch.log10(distance_matrix)
+
+    return L_gq
+
+def gaussian_log_pdf(
+        x: torch.Tensor, 
+        mean: torch.Tensor, 
+        variance: torch.Tensor, 
+) -> torch.Tensor:
+    variance = torch.clamp(variance, min=1e-6)
+
+    log_prob = -0.5 * torch.log(2.0 * torch.pi * variance) - 0.5 * (x - mean)**2 / variance
+
+    return log_prob
+
+
+###########################################
+##### --- Ping-Pong Updating step --- #####
+###########################################
+
+# (TODO: 之後要將transformer引入)
+def get_winner_neighbor_info(
     ref_index: int, 
-    tgt_index: int, 
     G_neighbor_index_matrix: torch.Tensor, 
     delta: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     
-    pass
+    G = delta.shape[0]
+
+    valid_mask = G_neighbor_index_matrix != -1
+    delta_prev = delta[:, ref_index]
+
+    invalid_score = -torch.inf
+    score_g_9 = torch.full((G, 9), invalid_score, dtype=torch.float32, device=delta.device)
+
+    for neighbor_pos in range(9):
+        neighbor_indices = G_neighbor_index_matrix[:, neighbor_pos]
+        mask = valid_mask[:, neighbor_pos]
+
+        if mask.any():
+            gathered_deltas = delta_prev[neighbor_indices[mask]]
+            score_g_9[mask, neighbor_pos] = gathered_deltas
+
+    max_value, G_winner_neighbor_relative_position = torch.max(score_g_9, dim=1)
+    row_indices_j = torch.arange(G, device=G_neighbor_index_matrix.device)
+    G_winner_neighbor_index = G_neighbor_index_matrix[
+        row_indices_j,
+        G_winner_neighbor_relative_position
+    ]
+    
+    return G_winner_neighbor_index, max_value
 
 def update_delta_and_path(
     t: int, 
@@ -423,4 +574,12 @@ def update_delta_and_path(
     current_emission_log_prob: torch.Tensor
 ):
 
-    pass
+    T = path.shape[1]
+
+##### --- Update delta ---
+    delta[:, tgt_index] = current_emission_log_prob + max_value
+
+##### --- Update path
+    path[:, T-1-t : T-1 : 1, tgt_index] = path[G_winner_neighbor_index, T-t : T : 1, ref_index]
+
+    return delta, path

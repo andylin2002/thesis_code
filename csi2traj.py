@@ -16,7 +16,7 @@ class CSItoTRAJ:
 
     ##### --- Importing Raw CSI Data ---
         RAW_CSI_PATH = 'csi_sample.npy'
-        raw_csi_data = utils.load_raw_csi(RAW_CSI_PATH)
+        raw_csi_data = utils.load_raw_csi(RAW_CSI_PATH, self.config)
 
         if raw_csi_data is None:
             print("CSI data loading failed.")
@@ -40,6 +40,7 @@ class CSItoTRAJ:
             )
 
     ##### --- Predicted Trajectory ---
-        
+
+        print(trajectory)
 
         return trajectory
