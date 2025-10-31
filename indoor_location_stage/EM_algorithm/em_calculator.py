@@ -394,7 +394,6 @@ def get_all_neighbor_indices(
 ##### --- Emission Probability GT --- #####
 ###########################################
 
-# (TODO: check if the function is right)
 def calculate_emission_probability(
         feature_matrix: torch.Tensor, 
         reference_grid: torch.Tensor,

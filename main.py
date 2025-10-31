@@ -1,7 +1,9 @@
 import utils
 import torch
 import argparse
-from csi2traj import CSItoTRAJ
+from typing import List
+
+from csi2traj import run_csi2traj
 
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -9,7 +11,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=30)
-    parser.add_argument('--round', type=int, default=10)
+    parser.add_argument('--round', type=int, default=30)
 
     args=parser.parse_args()
 
@@ -56,17 +58,24 @@ def main():
 ##### --- Dummy last_predicted_point ---
     context['last_predicted_point'] = torch.zeros(1, 2, dtype=torch.float32, device=DEVICE)
 
-##### --- Implement CSItoTRAJ ---
-    csi2traj_engine = CSItoTRAJ(config, reference_grid)
+##### --- List to store all trajectories ---
+    all_trajectories_list: List[torch.Tensor] = []
 
-    for round in range(config['ROUND']):
+##### --- Implement CSItoTRAJ ---
+
+    for round in range(config['ROUND']): # use while when it is RT system
         context['current_round'] = round
 
-        trajectory = csi2traj_engine.run_csi2traj(context)
+        trajectory = run_csi2traj(config, reference_grid, context)
+        all_trajectories_list.append(trajectory.clone().detach())
 
         context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
+    if all_trajectories_list:
+        full_dataset_tensor = torch.stack(all_trajectories_list, dim=0)
+
 ##### --- Transformer Training --- (TODO)
+
 
 
 if __name__ == '__main__':
