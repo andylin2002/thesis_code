@@ -5,7 +5,9 @@ import torch
 def run_csi2traj(
         config: Dict[str, Any], 
         reference_grid: torch.Tensor, 
-        context: Dict[str, Any]
+        context: Dict[str, Any], 
+        model: Optional[torch.nn.Module], 
+        mode: str
     ) -> Optional[torch.Tensor]:
 
 ##### --- Importing Raw CSI Data ---
@@ -31,7 +33,9 @@ def run_csi2traj(
         feature_matrix=feature_matrix,
         config=config,
         reference_grid=reference_grid,
-        context=context
+        context=context, 
+        model=model, 
+        mode=mode
     )
 
 ##### --- Predicted Trajectory ---

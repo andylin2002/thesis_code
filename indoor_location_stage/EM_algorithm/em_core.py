@@ -15,7 +15,9 @@ class EM_Algorithm:
             feature_matrix: torch.Tensor, 
             config: Dict[str, Any], 
             reference_grid: torch.Tensor,
-            context: Dict[str, Any]
+            context: Dict[str, Any], 
+            model: Optional[torch.nn.Module], 
+            mode: str
         ):
 
         self.feature_matrix = feature_matrix
@@ -53,14 +55,14 @@ class EM_Algorithm:
     def _initialize_Trajectory(self) -> Optional[TypeTrajectory]:
         
         # (FIXME)
-        if self.context['current_round'] == 0: # Fisrt round
+        if self.context['last_predicted_point'] == None: # Fisrt round
             power_q = self.feature_matrix[:, 0, 0]
             start_point = emc.select_initial_position(self.config, self.reference_grid, power_q, DEVICE)
-            trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
 
         else: # Not the fisrt round
             start_point = self.context['last_predicted_point']
-            trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
+
+        trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
 
         return trajectory
 

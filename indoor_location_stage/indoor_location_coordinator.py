@@ -10,6 +10,8 @@ def run_indoor_location(
         config: Dict[str, Any],
         reference_grid: torch.Tensor, 
         context: Dict[str, Any],
+        model: Optional[torch.nn.Module], 
+        mode: str
     ) -> Optional[TypeTrajectory]:
 
 ##### --- EM Algorithm ---
@@ -18,7 +20,9 @@ def run_indoor_location(
         feature_matrix=feature_matrix, 
         config=config, 
         reference_grid=reference_grid,
-        context=context
+        context=context, 
+        model=model, 
+        mode=mode
     )
 
     trajectory = em_engine.run_em_iterations()
