@@ -4,9 +4,12 @@ import argparse
 from typing import List, Dict, Any
 import time
 from multiprocessing import Queue, Process, set_start_method
+from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F, numpy as np, scipy.io, os
 
 from csi2traj import run_csi2traj
-#from transformer.trainer import create_transformer_instance (FIXME)
+from transformer.trainer import create_transformer_instance, convert_long_trajectory_to_ids, NoamOpt
+from transformer.architecture.batch import subsequent_mask
 
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -103,10 +106,10 @@ def CSI2TRAJECTORY_worker(
     current_transformer_model = None
 
 ##### --- LOS/NLOS ration for each AP --- 
-
     ap_data = config.get('ACCESS_POINTS', {})
     Q = len(ap_data)
     T = config['NUM_SAMPLE']
+    SLEEP = config.get('CSItoTRAJECTORY_SLEEP_S')
 
     epsilon = 1e-6
     random_noise = torch.rand(Q, T, 2, device=device) * epsilon
@@ -139,32 +142,28 @@ def CSI2TRAJECTORY_worker(
             pass
 
         if current_model_config['type'] == 'MARKOV':
-            trajectory = (
-                run_csi2traj(
-                    config=config, 
-                    reference_grid=reference_grid, 
-                    context=context, 
-                    model=None, 
-                    mode='MARKOV'
-                )
-            )
+            mode='MARKOV'
+            model=None
         elif current_model_config['type'] == 'TRANSFORMER':
-            trajectory = (
-                run_csi2traj(
-                    config=config, 
-                    reference_grid=reference_grid, 
-                    context=context, 
-                    model=current_transformer_model, 
-                    mode='TRANSFORMER'
-                )
+            mode='TRANSFORMER'
+            model=current_transformer_model
+
+        trajectory = (
+            run_csi2traj(
+                config=config, 
+                reference_grid=reference_grid, 
+                context=context, 
+                model=model, 
+                mode=mode
             )
+        )
 
         context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
         data_queue.put(trajectory.clone().detach())
 
         round_counter += 1
-        time.sleep(0.1) # (FIXME: 用arg或config來調整)
+        time.sleep(SLEEP)
 
 
 ##############################################
@@ -177,15 +176,105 @@ def TRANSFORMER_worker(
     config: Dict[str, Any], 
     device: torch.device
 ):
+##### --- Static Resource Loading and Initialization ---
     try:
-        # 讓 Worker 保持運行，但消耗極少的資源，等待 CSI Worker 結束
-        while True:
-            # 可選：從隊列中取出數據，防止隊列溢出，但不進行訓練
-            if not data_queue.empty():
-                _ = data_queue.get()
-            time.sleep(1) 
-    except KeyboardInterrupt:
-        pass
+        mat = scipy.io.loadmat("directions.mat")
+        directions_vectors = mat['directions']
+        
+        N_DIRECTIONS = directions_vectors.shape[0] # N_DIRECTIONS = 9
+        SOS_TOKEN = N_DIRECTIONS
+    except (FileNotFoundError, KeyError) as e:
+        print(f"[Trainer ERROR] Could not load resource: {e}. Check if 'directions.mat' is in root and key is 'directions'. Exiting.")
+        return
+    
+##### --- Parameters Setup ---
+    BATCH_SIZE = config['batch_size']
+    MIN_TRAJECTORIES_TO_TRAIN = config['MIN_TRAJ_TO_TRAIN']
+    SLEEP = config.get('TRANSFORMER_SLEEP_S')
+
+    # 模型實例化 (Encoder Input Size 應為 2)
+    model = create_transformer_instance(config, device)
+    
+    # 優化器設置
+    optim = NoamOpt(
+        config.get('emb_size', 512), 
+        config.get('factor', 1.), 
+        100000, 
+        torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
+    )
+
+    trajectory_buffer: List[torch.Tensor] = []
+    current_version = 0
+
+##### --- Online Learning Core Loop ---
+    while True:
+        # Data Collection
+        if not data_queue.empty():
+            trajectory_buffer.append(data_queue.get())
+            
+        # To Trigger Training
+        if len(trajectory_buffer) >= MIN_TRAJECTORIES_TO_TRAIN:
+
+            model.train()
+            trajs_for_batch = trajectory_buffer[:MIN_TRAJECTORIES_TO_TRAIN]
+            data_tensor = torch.stack(trajs_for_batch, dim=0) 
+            
+            try:
+                # inp_coords: (N, T-1, 2) | target_ids: (N, T-1)
+                inp_coords, target_ids = convert_long_trajectory_to_ids(
+                    data_tensor, directions_vectors, config, device
+                )
+            except Exception as e:
+                print(f"[Trainer ERROR] Long sequence conversion failed: {e}. Skipping batch.")
+                import traceback
+                traceback.print_exc()
+                trajectory_buffer = trajectory_buffer[MIN_TRAJECTORIES_TO_TRAIN:]
+                continue
+                
+            train_dataset = TensorDataset(inp_coords, target_ids)
+            tr_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            
+            epoch_loss = 0
+
+            for id_b, (inp, target) in enumerate(tr_dl):
+                
+                optim.optimizer.zero_grad()
+                n_in_batch = inp.shape[0]
+                
+                # Prepare the Causal Mask
+                trg_att = subsequent_mask(target.shape[1]).repeat(n_in_batch, 1, 1).to(device)
+                
+                # Prepare Teacher Forcing input: [SOS | Target IDs (x2...xT-1)]
+                start_of_seq = torch.tensor([SOS_TOKEN]).repeat(n_in_batch).unsqueeze(1).to(device)
+                dec_inp = torch.cat((start_of_seq, target[:,:-1]), 1)
+                
+                # Encoder(inp) + Decoder(dec_inp_teacher)
+                out = model(inp, dec_inp, None, trg_att)
+                
+                # Loss Calculation (Cross-Entropy)
+                loss = F.cross_entropy(out.view(-1, out.shape[-1]), target.view(-1), reduction='mean')
+                
+                loss.backward()
+                optim.step()
+                epoch_loss += loss.item()
+                
+            # Model Publication
+            current_version += 1
+            new_model_config = {
+                'version': current_version,
+                'type': 'TRANSFORMER',
+                'weights': model.state_dict(),
+            }
+            
+            model_queue.put(new_model_config)
+            print(f"[Trainer] Finished training V{current_version}. Loss: {epoch_loss/len(tr_dl):.4f}. Sent to CSI Worker.")
+            
+            # Clean up the used buffer
+            trajectory_buffer = trajectory_buffer[MIN_TRAJECTORIES_TO_TRAIN:]
+            
+        else:
+            time.sleep(SLEEP)
+
     
 
 if __name__ == '__main__':

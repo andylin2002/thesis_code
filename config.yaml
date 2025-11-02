@@ -47,3 +47,7 @@ ANTENNA_DISTANCE: 0.03                   # notation: d
 # --- Packeting & Aggregation ---
 NUM_SAMPLE: 15                           # notation: T
 NUM_PACKET: 100                            # notation: P
+
+### --- 3. Controller Setup --- ###
+CSItoTRAJECTORY_SLEEP_S: 0.1
+TRANSFORMER_SLEEP_S: 0.5
