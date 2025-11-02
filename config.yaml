@@ -49,5 +49,17 @@ NUM_SAMPLE: 15                           # notation: T
 NUM_PACKET: 100                            # notation: P
 
 ### --- 3. Controller Setup --- ###
+MIN_TRAJ_TO_TRAIN: 1000
+BATCH_SIZE: 70
+
 CSItoTRAJECTORY_SLEEP_S: 0.1
 TRANSFORMER_SLEEP_S: 0.5
+
+### --- 4. Transformer Parameter --- ###
+EMB_SIZE: 512
+HEADS: 8
+LAYERS: 6
+DROPOUT: 0.1
+
+NOAMOPT_FACTOR: 1.0
+NOAMOPT_WARMUP_STEPS: 4000

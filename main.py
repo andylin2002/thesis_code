@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F, numpy as np, scipy.io, os
 
 from csi2traj import run_csi2traj
-from transformer.trainer import create_transformer_instance, convert_long_trajectory_to_ids, NoamOpt
+from transformer.trainer import create_transformer_instance, convert_long_trajectory_to_ids
+from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
 CONFIG_PATH = 'config.yaml'
@@ -188,18 +189,18 @@ def TRANSFORMER_worker(
         return
     
 ##### --- Parameters Setup ---
-    BATCH_SIZE = config['batch_size']
+    BATCH_SIZE = config['BATCH_SIZE']
     MIN_TRAJECTORIES_TO_TRAIN = config['MIN_TRAJ_TO_TRAIN']
-    SLEEP = config.get('TRANSFORMER_SLEEP_S')
+    SLEEP = config['TRANSFORMER_SLEEP_S']
 
     # 模型實例化 (Encoder Input Size 應為 2)
     model = create_transformer_instance(config, device)
     
     # 優化器設置
     optim = NoamOpt(
-        config.get('emb_size', 512), 
-        config.get('factor', 1.), 
-        100000, 
+        config['EMB_SIZE'],
+        config['NOAMOPT_FACTOR'],
+        config['NOAMOPT_WARMUP_STEPS'], 
         torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
     )
 
@@ -275,7 +276,6 @@ def TRANSFORMER_worker(
         else:
             time.sleep(SLEEP)
 
-    
 
 if __name__ == '__main__':
     main()
