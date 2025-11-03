@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F, numpy as np, scipy.io, os
 
 from csi2traj import run_csi2traj
-from transformer.trainer import convert_long_trajectory_to_ids, create_transformer_instance
+from transformer.transformer_tool import convert_long_trajectory_to_ids, create_transformer_instance
 from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
@@ -56,6 +56,15 @@ def main():
     config['X_WIDTH'] = x_width
     config['Y_WIDTH'] = y_width
 
+##### --- Static Resource Loading and Initialization ---
+    try:
+        mat = scipy.io.loadmat("directions.mat")
+        DIRECTIONS_VECTORS = mat['directions']
+
+    except (FileNotFoundError, KeyError) as e:
+        print(f"[Trainer ERROR] Could not load resource: {e}. Check if 'directions.mat' is in root and key is 'directions'. Exiting.")
+        return
+
     device = DEVICE
 
     data_queue = Queue()  # CSI2TRAJECTORY Worker -> TRANSFORMER Worker
@@ -64,11 +73,11 @@ def main():
 ##### --- Processes for the Two-stage Pipeline
     csi2trajectory_worker_process = Process(
         target=CSI2TRAJECTORY_worker, 
-        args=(data_queue, model_queue, config, reference_grid, device)
+        args=(data_queue, model_queue, config, reference_grid, DIRECTIONS_VECTORS, device)
     )
     transformer_worker_process = Process(
         target=TRANSFORMER_worker, 
-        args=(data_queue, model_queue, config, device)
+        args=(data_queue, model_queue, config, DIRECTIONS_VECTORS, device)
     )
 
 ##### --- Start the Concurrent Execution of the Two Worker Processes
@@ -98,6 +107,7 @@ def CSI2TRAJECTORY_worker(
     model_queue: Queue, 
     config: Dict[str, Any], 
     reference_grid: Any,
+    directions_vectors: np.ndarray, 
     device: torch.device
 ):
 
@@ -156,11 +166,10 @@ def CSI2TRAJECTORY_worker(
                 reference_grid=reference_grid, 
                 context=context, 
                 model=model, 
-                mode=mode
+                mode=mode, 
+                directions_vectors=directions_vectors
             )
         )
-
-        print("[CSI2TRAJ]: print predicted trajectory")
 
         context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
@@ -178,24 +187,16 @@ def TRANSFORMER_worker(
     data_queue: Queue, 
     model_queue: Queue, 
     config: Dict[str, Any], 
+    directions_vectors: np.ndarray, 
     device: torch.device
 ):
-##### --- Static Resource Loading and Initialization ---
-    try:
-        mat = scipy.io.loadmat("directions.mat")
-        directions_vectors = mat['directions']
-
-    except (FileNotFoundError, KeyError) as e:
-        print(f"[Trainer ERROR] Could not load resource: {e}. Check if 'directions.mat' is in root and key is 'directions'. Exiting.")
-        return
-    
-    SOS_TOKEN = N_DIRECTIONS
-    
 ##### --- Parameters Setup ---
     TRAINING_EPOCHS = config['TRAINING_EPOCHS']
     BATCH_SIZE = config['BATCH_SIZE']
     MIN_TRAJECTORIES_TO_TRAIN = config['MIN_TRAJ_TO_TRAIN']
     SLEEP = config['TRANSFORMER_SLEEP_S']
+
+    SOS_TOKEN = N_DIRECTIONS
 
 ##### --- Instantiation ---
     model = create_transformer_instance(config, N_DIRECTIONS, device)
@@ -273,7 +274,7 @@ def TRANSFORMER_worker(
                     total_batches += 1
                     current_epoch_loss += loss.item()
                 
-                print(f"[TRANSFORMER] V{current_version + 1} Epoch {epoch_i + 1}/{TRAINING_EPOCHS} Loss: {epoch_loss/len(tr_dl):.4f}")
+                # print(f"[TRANSFORMER] V{current_version + 1} Epoch {epoch_i + 1}/{TRAINING_EPOCHS} Loss: {epoch_loss/len(tr_dl):.4f}")
                 
             # Model Publication
             current_version += 1

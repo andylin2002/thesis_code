@@ -2,6 +2,10 @@ import torch
 from typing import Dict, Any, Optional
 from torch.distributions import Normal
 
+import utils
+from transformer.transformer_tool import transformer_batch_predict_logits
+
+
 TypeTrajectory = torch.Tensor
 
 def get_ap_locations(config: Dict[str, Any], Q: int, device: torch.Tensor) -> torch.Tensor:
@@ -530,15 +534,35 @@ def gaussian_log_pdf(
 ##### --- Ping-Pong Updating step --- #####
 ###########################################
 
-# (TODO: 之後要將transformer引入)
+# FIXME
 def get_winner_neighbor_info(
+    t: int, 
+    reference_grid: torch.Tensor, 
     ref_index: int, 
     G_neighbor_index_matrix: torch.Tensor, 
-    delta: torch.Tensor
+    delta: torch.Tensor, 
+    path: torch.Tensor, 
+    model: Optional[torch.nn.Module], 
+    mode: str, 
+    SOS_TOKEN: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     
     G = delta.shape[0]
 
+##### --- Transition Log Probability Using Transformer ---
+    if model is not None:
+        with torch.no_grad():
+
+            history_coords = utils.get_history_coords_batch(reference_grid, ref_index, path)
+
+            transition_log_prob_G_9 = transformer_batch_predict_logits(
+                model, 
+                history_coords, 
+                SOS_TOKEN, 
+                device=delta.device
+            )
+
+##### --- Find Maximum Value and Index for each Point---
     valid_mask = G_neighbor_index_matrix != -1
     delta_prev = delta[:, ref_index]
 
@@ -546,12 +570,19 @@ def get_winner_neighbor_info(
     score_g_9 = torch.full((G, 9), invalid_score, dtype=torch.float32, device=delta.device)
 
     for neighbor_pos in range(9):
+        opposite_neighbor_pos = utils.opposite(neighbor_pos)
         neighbor_indices = G_neighbor_index_matrix[:, neighbor_pos]
         mask = valid_mask[:, neighbor_pos]
 
         if mask.any():
             gathered_deltas = delta_prev[neighbor_indices[mask]]
-            score_g_9[mask, neighbor_pos] = gathered_deltas
+
+            if mode == 'MARKOV':
+                score_g_9[mask, neighbor_pos] = gathered_deltas
+                
+            elif mode == 'TRANSFORMER':
+                gather_transition = transition_log_prob_G_9[neighbor_indices[mask], opposite_neighbor_pos]
+                score_g_9[mask, neighbor_pos] = gathered_deltas + gather_transition
 
     max_value, G_winner_neighbor_relative_position = torch.max(score_g_9, dim=1)
     row_indices_j = torch.arange(G, device=G_neighbor_index_matrix.device)

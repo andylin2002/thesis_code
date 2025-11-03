@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional
 import torch
+import numpy as np
 
 from .EM_algorithm.em_core import EM_Algorithm
 
@@ -11,7 +12,8 @@ def run_indoor_location(
         reference_grid: torch.Tensor, 
         context: Dict[str, Any],
         model: Optional[torch.nn.Module], 
-        mode: str
+        mode: str, 
+        directions_vectors: np.ndarray
     ) -> Optional[TypeTrajectory]:
 
 ##### --- EM Algorithm ---
@@ -22,7 +24,8 @@ def run_indoor_location(
         reference_grid=reference_grid,
         context=context, 
         model=model, 
-        mode=mode
+        mode=mode, 
+        directions_vectors=directions_vectors
     )
 
     trajectory = em_engine.run_em_iterations()

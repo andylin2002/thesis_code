@@ -1,8 +1,10 @@
 from typing import List, Dict, Any, Optional
 import torch
+import numpy as np
 
 from . import em_calculator as emc
 from markov_model.uniform_markov import generate_uniform_markov_trajectory
+from transformer.transformer_tool import generate_transformer_trajectory
 
 TypeTrajectory = torch.Tensor
 TypePropParams = Dict[str,torch.Tensor]
@@ -17,13 +19,20 @@ class EM_Algorithm:
             reference_grid: torch.Tensor,
             context: Dict[str, Any], 
             model: Optional[torch.nn.Module], 
-            mode: str
+            mode: str, 
+            directions_vectors: np.ndarray
         ):
 
         self.feature_matrix = feature_matrix
         self.config = config
         self.reference_grid = reference_grid 
         self.context = context
+        self.model = model
+        self.mode = mode
+        self.directions_vectors = directions_vectors
+
+        N_DIRECTIONS = self.directions_vectors.shape[0]
+        self.SOS_TOKEN = N_DIRECTIONS
 
     ##### --- Get Q and T ---
         self.ap_data = config.get('ACCESS_POINTS', {})
@@ -53,8 +62,7 @@ class EM_Algorithm:
 
     
     def _initialize_Trajectory(self) -> Optional[TypeTrajectory]:
-        
-        # (FIXME)
+
         if self.context['last_predicted_point'] == None: # Fisrt round
             power_q = self.feature_matrix[:, 0, 0]
             start_point = emc.select_initial_position(self.config, self.reference_grid, power_q, DEVICE)
@@ -62,7 +70,28 @@ class EM_Algorithm:
         else: # Not the fisrt round
             start_point = self.context['last_predicted_point']
 
-        trajectory = generate_uniform_markov_trajectory(self.config, self.reference_grid, start_point, DEVICE)
+        if self.mode == 'MARKOV':
+            trajectory = (
+                generate_uniform_markov_trajectory(
+                    config=self.config, 
+                    reference_grid=self.reference_grid, 
+                    start_point=start_point, 
+                    device=DEVICE
+                )
+            )
+        elif self.mode == 'TRANSFORMER':
+            trajectory = (
+                generate_transformer_trajectory(
+                    model=self.model,
+                    start_point=start_point,
+                    directions_vectors=self.directions_vectors,
+                    T_length=self.num_sample,
+                    SOS_TOKEN=self.SOS_TOKEN,
+                    device=DEVICE
+                )
+            )
+
+            print("TRANSFORMER: ", trajectory)
 
         return trajectory
 
@@ -295,9 +324,15 @@ class EM_Algorithm:
 
             G_winner_neighbor_index, max_value = (
                 emc.get_winner_neighbor_info(
+                    t, 
+                    reference_grid, 
                     ref_index, 
                     G_neighbor_index_matrix, 
-                    delta
+                    delta, 
+                    path, 
+                    self.model,    
+                    self.mode, 
+                    self.SOS_TOKEN
                 )
             )
             delta, path = (
@@ -305,7 +340,8 @@ class EM_Algorithm:
                     t, 
                     ref_index, 
                     tgt_index, 
-                    delta, path, 
+                    delta, 
+                    path, 
                     G_winner_neighbor_index, 
                     max_value, 
                     current_emission_log_prob

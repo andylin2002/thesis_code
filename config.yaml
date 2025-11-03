@@ -49,9 +49,9 @@ NUM_SAMPLE: 15                            # notation: T
 NUM_PACKET: 100                           # notation: P
 
 ### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 1000
-BATCH_SIZE: 100
-TRAINING_EPOCHS: 100
+MIN_TRAJ_TO_TRAIN: 10
+BATCH_SIZE: 10
+TRAINING_EPOCHS: 50
 
 CSItoTRAJECTORY_SLEEP_S: 0.1
 TRANSFORMER_SLEEP_S: 0.1

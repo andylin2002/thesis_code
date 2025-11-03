@@ -152,3 +152,55 @@ def load_raw_csi(path, config):
     except FileNotFoundError:
         print(f"Error: Raw data file not found at {path}. Please check file existence.")
         return None
+    
+def opposite(neighbor_pos: int) -> int:
+    
+    INVERSE_MAP = {
+        0: 8,
+        1: 7,
+        2: 6,
+        3: 5,
+        4: 4,
+        5: 3,
+        6: 2,
+        7: 1,
+        8: 0
+    }
+    
+    if neighbor_pos not in INVERSE_MAP:
+        raise ValueError(f"Invalid neighbor_pos ID: {neighbor_pos}. Must be between 0 and 8.")
+
+    return INVERSE_MAP[neighbor_pos]
+
+def get_history_coords_batch(
+    reference_grid: torch.Tensor, 
+    ref_index: int, 
+    path: torch.Tensor, 
+) -> torch.Tensor:
+    
+    G, T, _ = path.shape
+    device = path.device
+
+    FILL_VALUE = -torch.inf
+    
+    # Extract grid index sequence
+    grid_indices_sequence = path[:, :, ref_index].clone()
+    valid_mask = (grid_indices_sequence != -1)
+    valid_indices_flat = grid_indices_sequence[valid_mask].long()
+    
+    # Coordinate lookup
+    coords_flat = reference_grid[valid_indices_flat].to(device)
+    
+    # Initialize the output tensor with the special fill value for padding
+    history_coords = torch.full(
+        (G, T, 2), 
+        FILL_VALUE, 
+        dtype=torch.float32, 
+        device=device
+    )
+    
+    # Fill in the valid coordinates using the mask
+    history_coords[valid_mask] = coords_flat
+    
+    return history_coords
+
