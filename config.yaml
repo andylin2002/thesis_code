@@ -42,24 +42,26 @@ CSI_DIMENSIONS:
 # --- Frequency & Inter-element Spacing ---
 CARRIER_FREQUENCY_HZ: 5000000000.0
 CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B
-ANTENNA_DISTANCE: 0.03                   # notation: d
+ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 15                           # notation: T
-NUM_PACKET: 100                            # notation: P
+NUM_SAMPLE: 15                            # notation: T
+NUM_PACKET: 100                           # notation: P
 
 ### --- 3. Controller Setup --- ###
 MIN_TRAJ_TO_TRAIN: 1000
-BATCH_SIZE: 70
+BATCH_SIZE: 100
+TRAINING_EPOCHS: 100
 
 CSItoTRAJECTORY_SLEEP_S: 0.1
-TRANSFORMER_SLEEP_S: 0.5
+TRANSFORMER_SLEEP_S: 0.1
 
 ### --- 4. Transformer Parameter --- ###
 EMB_SIZE: 512
 HEADS: 8
 LAYERS: 6
 DROPOUT: 0.1
+D_FF: 2048                                # Feed Forward Dimension
 
 NOAMOPT_FACTOR: 1.0
 NOAMOPT_WARMUP_STEPS: 4000

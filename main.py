@@ -8,12 +8,13 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F, numpy as np, scipy.io, os
 
 from csi2traj import run_csi2traj
-from transformer.trainer import create_transformer_instance, convert_long_trajectory_to_ids
+from transformer.trainer import convert_long_trajectory_to_ids, create_transformer_instance
 from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+N_DIRECTIONS = 9
 
 
 ##############################################
@@ -33,7 +34,7 @@ def main():
 ##### --- Initialize the argument parser
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=30)
-    parser.add_argument('--round', type=int, default=5)
+    parser.add_argument('--round', type=int, default=5000)
 
     args=parser.parse_args()
 
@@ -134,7 +135,7 @@ def CSI2TRAJECTORY_worker(
 
             if new_model_config['type'] == 'TRANSFORMER':
                 if current_transformer_model is None:
-                    current_transformer_model = create_transformer_instance(config, device)
+                    current_transformer_model = create_transformer_instance(config, N_DIRECTIONS, device)
 
                 current_transformer_model.load_state_dict(new_model_config['weights'])
                 current_transformer_model.eval()
@@ -159,6 +160,8 @@ def CSI2TRAJECTORY_worker(
             )
         )
 
+        print("[CSI2TRAJ]: print predicted trajectory")
+
         context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
         data_queue.put(trajectory.clone().detach())
@@ -181,22 +184,23 @@ def TRANSFORMER_worker(
     try:
         mat = scipy.io.loadmat("directions.mat")
         directions_vectors = mat['directions']
-        
-        N_DIRECTIONS = directions_vectors.shape[0] # N_DIRECTIONS = 9
-        SOS_TOKEN = N_DIRECTIONS
+
     except (FileNotFoundError, KeyError) as e:
         print(f"[Trainer ERROR] Could not load resource: {e}. Check if 'directions.mat' is in root and key is 'directions'. Exiting.")
         return
     
+    SOS_TOKEN = N_DIRECTIONS
+    
 ##### --- Parameters Setup ---
+    TRAINING_EPOCHS = config['TRAINING_EPOCHS']
     BATCH_SIZE = config['BATCH_SIZE']
     MIN_TRAJECTORIES_TO_TRAIN = config['MIN_TRAJ_TO_TRAIN']
     SLEEP = config['TRANSFORMER_SLEEP_S']
 
-    # 模型實例化 (Encoder Input Size 應為 2)
-    model = create_transformer_instance(config, device)
+##### --- Instantiation ---
+    model = create_transformer_instance(config, N_DIRECTIONS, device)
     
-    # 優化器設置
+##### --- Optimization ---
     optim = NoamOpt(
         config['EMB_SIZE'],
         config['NOAMOPT_FACTOR'],
@@ -215,6 +219,7 @@ def TRANSFORMER_worker(
             
         # To Trigger Training
         if len(trajectory_buffer) >= MIN_TRAJECTORIES_TO_TRAIN:
+            print("[TRANSFORMER] Start Training...")
 
             model.train()
             trajs_for_batch = trajectory_buffer[:MIN_TRAJECTORIES_TO_TRAIN]
@@ -233,34 +238,46 @@ def TRANSFORMER_worker(
                 continue
                 
             train_dataset = TensorDataset(inp_coords, target_ids)
-            tr_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-            
-            epoch_loss = 0
 
-            for id_b, (inp, target) in enumerate(tr_dl):
+            total_batches = 0
+            current_epoch_loss = 0.0
+
+            for epoch_i in range(TRAINING_EPOCHS):
+                tr_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            
+                epoch_loss = 0.0
+
+                for id_b, (inp, target) in enumerate(tr_dl):
+                    
+                    optim.optimizer.zero_grad()
+                    n_in_batch = inp.shape[0]
+                    
+                    # Prepare the Causal Mask
+                    trg_att = subsequent_mask(target.shape[1]).repeat(n_in_batch, 1, 1).to(device)
+                    
+                    # Prepare Teacher Forcing input: [SOS | Target IDs (x2...xT-1)]
+                    start_of_seq = torch.tensor([SOS_TOKEN]).repeat(n_in_batch).unsqueeze(1).to(device)
+                    dec_inp = torch.cat((start_of_seq, target[:,:-1]), 1)
+                    
+                    # Encoder(inp) + Decoder(dec_inp_teacher)
+                    out = model(inp, dec_inp, None, trg_att)
+                    
+                    # Loss Calculation (Cross-Entropy)
+                    loss = F.cross_entropy(out.view(-1, out.shape[-1]), target.view(-1), reduction='mean')
+                    
+                    loss.backward()
+                    optim.step()
+
+                    time.sleep(SLEEP)
+                    epoch_loss += loss.item()
+                    total_batches += 1
+                    current_epoch_loss += loss.item()
                 
-                optim.optimizer.zero_grad()
-                n_in_batch = inp.shape[0]
-                
-                # Prepare the Causal Mask
-                trg_att = subsequent_mask(target.shape[1]).repeat(n_in_batch, 1, 1).to(device)
-                
-                # Prepare Teacher Forcing input: [SOS | Target IDs (x2...xT-1)]
-                start_of_seq = torch.tensor([SOS_TOKEN]).repeat(n_in_batch).unsqueeze(1).to(device)
-                dec_inp = torch.cat((start_of_seq, target[:,:-1]), 1)
-                
-                # Encoder(inp) + Decoder(dec_inp_teacher)
-                out = model(inp, dec_inp, None, trg_att)
-                
-                # Loss Calculation (Cross-Entropy)
-                loss = F.cross_entropy(out.view(-1, out.shape[-1]), target.view(-1), reduction='mean')
-                
-                loss.backward()
-                optim.step()
-                epoch_loss += loss.item()
+                print(f"[TRANSFORMER] V{current_version + 1} Epoch {epoch_i + 1}/{TRAINING_EPOCHS} Loss: {epoch_loss/len(tr_dl):.4f}")
                 
             # Model Publication
             current_version += 1
+            avg_loss = current_epoch_loss / total_batches
             new_model_config = {
                 'version': current_version,
                 'type': 'TRANSFORMER',
@@ -268,7 +285,7 @@ def TRANSFORMER_worker(
             }
             
             model_queue.put(new_model_config)
-            print(f"[Trainer] Finished training V{current_version}. Loss: {epoch_loss/len(tr_dl):.4f}. Sent to CSI Worker.")
+            print(f"[TRANSFORMER] Finished training V{current_version}. Final Avg Loss: {avg_loss:.4f}. Sent to CSI Worker.")
             
             # Clean up the used buffer
             trajectory_buffer = trajectory_buffer[MIN_TRAJECTORIES_TO_TRAIN:]
