@@ -338,58 +338,38 @@ from typing import Dict, Any
 
 def get_all_neighbor_indices(
     config: Dict[str, Any],
-    grid_indices_G: torch.Tensor, # <--- 接受形狀為 [G] 的張量
+    grid_indices_G: torch.Tensor, 
     device: torch.device
 ) -> torch.Tensor:
-    """
-    向量化版本：輸入 G 個網格索引 (形狀 [G])，輸出 G 個點各自的 9 個鄰近點索引 (形狀 [G, 9])。
     
-    無效的鄰近點會用 -1 填充。
-    """
+    # Parameter Setup
+    W = config['X_WIDTH'] 
+    H = config['Y_WIDTH'] 
+    G = grid_indices_G.shape[0] # Numbers of Reference Point
     
-    # 1. 從配置中獲取網格尺寸 W 和 H
-    W = config['X_WIDTH']  # 網格寬度 (列數)
-    H = config['Y_WIDTH']  # 網格高度 (行數)
-    G = grid_indices_G.shape[0] # 輸入點的數量
-    
-    # 2. 將一維索引 [G] 轉換為二維座標 [G, 1]
-    # grid_indices_G 必須是 long 類型
+    # grid_indices_G must be of long type
     grid_indices_G = grid_indices_G.long() 
     
     # [G] -> [G, 1]
     current_rows_G = (grid_indices_G // W).unsqueeze(1) 
     current_cols_G = (grid_indices_G % W).unsqueeze(1)
     
-    # 3. 預先計算偏移量張量
-    # 偏移量矩陣 (3x3 = 9 種組合)，形狀 [1, 9]
-    delta_row_1_9 = torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.long, device=device).unsqueeze(0)
-    delta_col_1_9 = torch.tensor([-1, 0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.long, device=device).unsqueeze(0)
+    # Offset matrix (3x3 = 9 combinations), shape [1, 9]
+    offset_row_1_9 = torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.long, device=device).unsqueeze(0)
+    offset_col_1_9 = torch.tensor([-1, 0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.long, device=device).unsqueeze(0)
+  
+    # Broadcasting [G, 1] + [1, 9] -> [G, 9]
+    candidate_rows_G_9 = current_rows_G + offset_row_1_9
+    candidate_cols_G_9 = current_cols_G + offset_col_1_9
     
-    # 4. 廣播運算計算所有 G * 9 個候選點的 (row, col)
-    # [G, 1] + [1, 9] -> [G, 9]
-    
-    # 候選行座標 [G, 9]
-    candidate_rows_G_9 = current_rows_G + delta_row_1_9
-    # 候選列座標 [G, 9]
-    candidate_cols_G_9 = current_cols_G + delta_col_1_9
-    
-    # 5. 邊界檢查 (使用掩碼)，形狀 [G, 9]
+    # Boundary Check (using mask), shape [G, 9]
     mask_row_valid = (candidate_rows_G_9 >= 0) & (candidate_rows_G_9 < H)
     mask_col_valid = (candidate_cols_G_9 >= 0) & (candidate_cols_G_9 < W)
     valid_mask_G_9 = mask_row_valid & mask_col_valid
     
-    # 6. 將有效的 (row, col) 轉換回一維索引 [G, 9]
-    
-    # 計算所有 9 個候選點的一維索引 (包含邊界外的值)
-    # W 是 Python int，可以直接用於乘法
+    # Convert 2D candidate coordinates to 1D indices, applying the validity mask
     all_candidate_indices_G_9 = candidate_rows_G_9 * W + candidate_cols_G_9
-    
-    # 7. 應用掩碼：無效的點設定為 -1
-    # 創建一個填充了 -1 的張量作為基礎
     neighbor_indices = torch.full((G, 9), -1, dtype=torch.long, device=device)
-    
-    # 將所有有效索引放入結果張量中
-    # 這裡我們使用 where 或直接的索引替換
     neighbor_indices[valid_mask_G_9] = all_candidate_indices_G_9[valid_mask_G_9]
     
     return neighbor_indices
@@ -406,7 +386,7 @@ def calculate_emission_probability(
         device: torch.device
 ) -> torch.Tensor:
     
-    # Extract Power, Angle, Delay observations (Q, T)
+##### --- Extract Power, Angle, Delay observations (Q, T) ---
     power_qt = feature_matrix[:, :, 0] 
     angle_qt = feature_matrix[:, :, 1] 
     delay_qt = feature_matrix[:, :, 2] 
@@ -416,7 +396,7 @@ def calculate_emission_probability(
     K = 2                       # Number of states (LOS/NLOS)
     DEVICE = device
     
-    # --- Parameter Preparation and Reshaping ---
+##### --- Parameter Preparation and Reshaping ---
     # (Q, K) -> (1, Q, 1, K) for broadcasting
     alpha_1q1k = propagation_params['alpha_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
     beta_1q1k  = propagation_params['beta_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
@@ -427,7 +407,7 @@ def calculate_emission_probability(
     delay_mean_111k = propagation_params['delay_k_mean'].to(DEVICE).view(1, 1, 1, K)
     delay_var_111k = propagation_params['delay_k_var'].to(DEVICE).view(1, 1, 1, K)
     
-    # --- Grid Distance (L_gq) and Angle Mean Calculation ---
+##### --- Grid Distance (L_gq) and Angle Mean Calculation ---
     # Calculate log10(Distance) for each grid point g to each AP q, shape (G, Q)
     L_gq = calculate_L_gq(reference_grid, ap_locations).to(DEVICE)
     # Reshape for broadcasting to (G, Q, 1, 1)
@@ -438,7 +418,7 @@ def calculate_emission_probability(
     # Reshape for broadcasting to (G, Q, 1, 1)
     angle_gq11_mean = angle_gq_mean.unsqueeze(2).unsqueeze(3)
     
-    # --- Feature Mean and Variance Calculation (Broadcasted) ---
+##### --- Feature Mean and Variance Calculation (Broadcasted) ---
     
     # --- Power ---
     # Power Mean (G, Q, 1, K) = beta_qk - (alpha_qk * log10(L_gq)) (Log-distance model)
@@ -460,24 +440,24 @@ def calculate_emission_probability(
     # Delay Var (G, Q, T, K) - Expand over G, Q, T dimensions
     delay_gqtk_var = delay_var_111k.expand(G, Q, T, K)
 
-    # --- Reshape Observations for Broadcasting ---
+##### --- Reshape Observations for Broadcasting ---
     # Observations (Q, T) -> (1, Q, T, 1) -> (G, Q, T, K)
     power_gqtk = power_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
     angle_gqtk = angle_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
     delay_gqtk = delay_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
     
-    # --- Calculate Log PDF for each feature (G, Q, T, K) ---
+##### --- Calculate Log PDF for each feature (G, Q, T, K) ---
     log_P_power_gqtk = gaussian_log_pdf(power_gqtk, power_gqtk_mean, power_gqtk_var)
     log_P_angle_gqtk = gaussian_log_pdf(angle_gqtk, angle_gqtk_mean, angle_gqtk_var)
     log_P_delay_gqtk = gaussian_log_pdf(delay_gqtk, delay_gqtk_mean, delay_gqtk_var)
 
-    # --- Incorporate Global LOS Prior $\pi_k$ ---
+##### --- Incorporate Global LOS Prior pi_k ---
     # (K) -> (1, 1, 1, K) -> (G, Q, T, K)
     pi_k = propagation_params['pi_global_LOS_ratio'].to(DEVICE)
     log_pi_k_111k = torch.log(pi_k.clamp(min=1e-10)).view(1, 1, 1, K)
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
-    # Emission Probability
+##### --- Emission Probability ---
     log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
     log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
     emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
@@ -485,12 +465,12 @@ def calculate_emission_probability(
     return emission_log_prob_gt
 
 def calculate_angle_gq_mean(
-        reference_grid: torch.Tensor, # Shape (G, 2)
+        reference_grid: torch.Tensor, # Shape [G, 2]
         ap_locations: torch.Tensor, 
 ) -> torch.Tensor:
     
-    ap_locations_expanded = ap_locations.unsqueeze(0)     # (1, Q, 2)
-    grid_expanded = reference_grid.unsqueeze(1)           # (G, 1, 2)
+    ap_locations_expanded = ap_locations.unsqueeze(0)     # Shape [1, Q, 2]
+    grid_expanded = reference_grid.unsqueeze(1)           # Shape [G, 1, 2]
 
     vector_V_gq = ap_locations_expanded - grid_expanded
     x_diff = vector_V_gq[..., 0]
@@ -508,8 +488,8 @@ def calculate_L_gq(
         ap_locations: torch.Tensor, 
 ) -> torch.Tensor:
     
-    ap_locations_expanded = ap_locations.unsqueeze(0)     # (1, Q, 2)
-    grid_expanded = reference_grid.unsqueeze(1)           # (G, 1, 2)
+    ap_locations_expanded = ap_locations.unsqueeze(0)     # Shape [1, Q, 2]
+    grid_expanded = reference_grid.unsqueeze(1)           # Shape [G, 1, 2]
 
     squared_diff = (ap_locations_expanded - grid_expanded) ** 2
     distance_matrix = torch.sqrt(squared_diff.sum(dim=2))
@@ -534,7 +514,6 @@ def gaussian_log_pdf(
 ##### --- Ping-Pong Updating step --- #####
 ###########################################
 
-# FIXME
 def get_winner_neighbor_info(
     t: int, 
     reference_grid: torch.Tensor, 
@@ -569,11 +548,13 @@ def get_winner_neighbor_info(
     invalid_score = -torch.inf
     score_g_9 = torch.full((G, 9), invalid_score, dtype=torch.float32, device=delta.device)
 
+    # 9 Directions
     for neighbor_pos in range(9):
         opposite_neighbor_pos = utils.opposite(neighbor_pos)
         neighbor_indices = G_neighbor_index_matrix[:, neighbor_pos]
         mask = valid_mask[:, neighbor_pos]
 
+        # If there is any available neighbor
         if mask.any():
             gathered_deltas = delta_prev[neighbor_indices[mask]]
 
@@ -584,6 +565,7 @@ def get_winner_neighbor_info(
                 gather_transition = transition_log_prob_G_9[neighbor_indices[mask], opposite_neighbor_pos]
                 score_g_9[mask, neighbor_pos] = gathered_deltas + gather_transition
 
+    # Find Max and Argmax of score for each Reference Point
     max_value, G_winner_neighbor_relative_position = torch.max(score_g_9, dim=1)
     row_indices_j = torch.arange(G, device=G_neighbor_index_matrix.device)
     G_winner_neighbor_index = G_neighbor_index_matrix[

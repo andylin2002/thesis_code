@@ -304,9 +304,11 @@ class EM_Algorithm:
         )
 
     ##### --- Second: PingPong Updating step ---
+        # Construct Neighbor Table
         G_index = torch.arange(G).to(DEVICE)
         G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
+        # Initialize delta and path
         delta = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
         path = torch.full((G, T, 2), -1, dtype=torch.long, device=DEVICE)
 
@@ -315,6 +317,7 @@ class EM_Algorithm:
         G_index_stacked = torch.stack([G_index, G_index], dim=1)
         path[:, -1, :] = G_index_stacked
 
+        # delta and path are Update over 't-1' Iteration
         for t in range(1, T):
             # Ping-Pong Structure
             ref_index = (t + 1) % 2
@@ -322,6 +325,7 @@ class EM_Algorithm:
 
             current_emission_log_prob = emission_probability_gt[:, t]
 
+            # Find the Max and Argmax of 'delta + logP' for each Reference Point
             G_winner_neighbor_index, max_value = (
                 emc.get_winner_neighbor_info(
                     t, 
@@ -335,6 +339,8 @@ class EM_Algorithm:
                     self.SOS_TOKEN
                 )
             )
+
+            # Update
             delta, path = (
                 emc.update_delta_and_path(
                     t, 
@@ -348,6 +354,7 @@ class EM_Algorithm:
                 )
             )
 
+            # Find the Trajectory by the Largest delta
             if t == (T - 1):
                 MEPLL_Trajectory, chosen_index = torch.max(delta[:, tgt_index], dim=0)
                 trajectory_index_sequence = path[chosen_index, :, tgt_index]
@@ -359,7 +366,6 @@ class EM_Algorithm:
     def _check_convergence(self):
 
         current_MEPLL = self.MEPLL_PropParams + self.MEPLL_Trajectory
-    
         diff = abs(self.MEPLL_record - current_MEPLL)
 
         if diff < 1e-6:

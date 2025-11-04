@@ -156,6 +156,7 @@ def CSI2TRAJECTORY_worker(
         if current_model_config['type'] == 'MARKOV':
             mode='MARKOV'
             model=None
+
         elif current_model_config['type'] == 'TRANSFORMER':
             mode='TRANSFORMER'
             model=current_transformer_model
@@ -229,7 +230,7 @@ def TRANSFORMER_worker(
             try:
                 # inp_coords: (N, T-1, 2) | target_ids: (N, T-1)
                 inp_coords, target_ids = convert_long_trajectory_to_ids(
-                    data_tensor, directions_vectors, config, device
+                    data_tensor, directions_vectors, device
                 )
             except Exception as e:
                 print(f"[Trainer ERROR] Long sequence conversion failed: {e}. Skipping batch.")
