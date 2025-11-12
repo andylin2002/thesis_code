@@ -6,30 +6,26 @@ DIMENSION: 2  # 2D (x, y)
 ACCESS_POINTS:
   # AP_ID 1
   AP_1:
-    NAME: "AP_Southwest"
-    LOCATION_M: [0, 0]
-    ORIENTATION_DEG: 45.0
+    NAME: "AP_window"
+    LOCATION_M: [-10, -0.5]
 
   # AP_ID 2
   AP_2:
     NAME: "AP_North"
-    LOCATION_M: [2, 3]
-    ORIENTATION_DEG: 270.0
+    LOCATION_M: [8, -5]
 
   # AP_ID 3
   AP_3:
     NAME: "AP_East"
-    LOCATION_M: [4, 0]
-    ORIENTATION_DEG: 180.0
+    LOCATION_M: [-1.5, 7]
 
   # AP_ID 4
   AP_4:
     NAME: "AP_Northwest"
-    LOCATION_M: [0, 2]
-    ORIENTATION_DEG: 325.0
+    LOCATION_M: [-3.5, -8]
 
 # --- Grid Generation Parameters ---
-GRID_RESOLUTION_M: 1  
+GRID_RESOLUTION_M: 0.5  
 BUFFER_DISTANCE_M: 0
 
 
@@ -37,11 +33,11 @@ BUFFER_DISTANCE_M: 0
 ### --- 2. System Setup --- ###
 CSI_DIMENSIONS:
   NUM_RX_ANTENNAS: 3                      # notation: N
-  NUM_SUBCARRIERS: 30                     # notation: M
+  NUM_SUBCARRIERS: 30                     # notation: M @@@
   
 # --- Frequency & Inter-element Spacing ---
-CARRIER_FREQUENCY_HZ: 5000000000.0
-CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B
+CARRIER_FREQUENCY_HZ: 5180000000.0
+CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
@@ -49,7 +45,7 @@ NUM_SAMPLE: 15                            # notation: T
 NUM_PACKET: 100                           # notation: P
 
 ### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 10
+MIN_TRAJ_TO_TRAIN: 30
 BATCH_SIZE: 10
 TRAINING_EPOCHS: 50
 

@@ -35,3 +35,7 @@ env/
 # IDE files
 .vscode/
 .idea/
+
+# Dataset
+dataset/
+*.ckpt

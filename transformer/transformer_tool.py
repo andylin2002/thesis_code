@@ -10,7 +10,7 @@ from transformer.architecture.batch import subsequent_mask
 
 def create_transformer_instance(
     config: Dict[str, Any], 
-    N_DIRECTIONS: int, 
+    n_directions: int, 
     device: torch.device
 ):
     
@@ -22,8 +22,8 @@ def create_transformer_instance(
 
     model = QuantizedTF(
                 enc_inp_size=2, 
-                dec_inp_size=(N_DIRECTIONS + 1),
-                dec_out_size=N_DIRECTIONS,
+                dec_inp_size=(n_directions + 1),
+                dec_out_size=n_directions,
                 
                 layer=N_LAYERS,
                 d_model=D_MODEL,

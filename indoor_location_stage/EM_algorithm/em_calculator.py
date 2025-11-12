@@ -92,7 +92,7 @@ def select_initial_position(
     distances = torch.linalg.norm(reference_grid - strongest_power_ap_pos.unsqueeze(0).to(reference_grid.device), dim=1)
     start_grid_idx = torch.argmin(distances).item()
 
-    return reference_grid[start_grid_idx]
+    return reference_grid[start_grid_idx].unsqueeze(0)
 
 ###########################################
 ##### --- Power's mean & variance --- #####

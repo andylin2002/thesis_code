@@ -131,6 +131,7 @@ def visualize_grid_and_aps(grid_points: np.ndarray, ap_locations: np.ndarray, x_
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.show()
 
+# (TODO: 等到load dataset完成後要把這裡替換掉)
 def load_raw_csi(path, config):
     """Loads the integrated complex CSI data from a .npy file."""
     Q = len(config.get('ACCESS_POINTS', {}))

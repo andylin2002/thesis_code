@@ -63,6 +63,7 @@ class EM_Algorithm:
     
     def _initialize_Trajectory(self) -> Optional[TypeTrajectory]:
 
+        # start_point's shape: [1, 2]
         if self.context['last_predicted_point'] == None: # Fisrt round
             power_q = self.feature_matrix[:, 0, 0]
             start_point = emc.select_initial_position(self.config, self.reference_grid, power_q, DEVICE)
@@ -90,8 +91,6 @@ class EM_Algorithm:
                     device=DEVICE
                 )
             )
-
-            print("TRANSFORMER: ", trajectory)
 
         return trajectory
 
@@ -261,7 +260,7 @@ class EM_Algorithm:
             )
 
         ##### --- Check Whether 'findPropParams_step' is convergent ---
-            if MEPLL_PropParams_new > MAX_MEPLL_PropParams + 1e-6:
+            if MEPLL_PropParams_new > MAX_MEPLL_PropParams + 1e-4:
                 MAX_MEPLL_PropParams = MEPLL_PropParams_new
                 gamma_qtk = gamma_qtk_new
                 continue
