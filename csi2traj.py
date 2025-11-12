@@ -9,13 +9,11 @@ def run_csi2traj(
         context: Dict[str, Any], 
         model: Optional[torch.nn.Module], 
         mode: str, 
-        directions_vectors: np.ndarray
+        directions_vectors: np.ndarray, 
+        raw_csi_data: torch.Tensor
     ) -> Optional[torch.Tensor]:
 
 ##### --- Importing Raw CSI Data ---
-    RAW_CSI_PATH = 'csi_sample.npy'
-    raw_csi_data = utils.load_raw_csi(RAW_CSI_PATH, config)
-
     if raw_csi_data is None:
         print("CSI data loading failed.")
         return

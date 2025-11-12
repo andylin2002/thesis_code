@@ -6,7 +6,7 @@ from . import aggregation
 import torch
 
 def run_data_processor(
-        raw_csi_data_tensor: torch.Tensor, 
+        raw_csi_data: torch.Tensor, 
         config: Dict[str, Any]
 ) -> Optional[torch.Tensor]:
     
@@ -19,7 +19,7 @@ def run_data_processor(
 ##### --- Packeting ---
     # input: (Q, TP, N, M)
     packeted_csi_gpu = packeting.run_packeting_gpu(
-        csi_data=raw_csi_data_tensor,
+        csi_data=raw_csi_data,
         T_time=num_sample,
         P_packet=num_packet
     ) # output: (Q, T, P, N, M)
@@ -44,6 +44,6 @@ def run_data_processor(
         *aggregated_csi_gpu.shape[2:]
     ) # output: (Q, T, 1, N, M)
 
-    processed_csi_tensor = reshape_aggregated_csi_gpu.squeeze(2) # shape: (Q, T, N, M)
+    processed_csi = reshape_aggregated_csi_gpu.squeeze(2) # shape: (Q, T, N, M)
 
-    return processed_csi_tensor
+    return processed_csi

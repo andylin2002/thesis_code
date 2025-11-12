@@ -12,6 +12,7 @@ from transformer.transformer_tool import convert_long_trajectory_to_ids, create_
 from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
+DATASET_FOLDER = 'dataset'
 CHECKPOINT_DIR = 'checkpoint'
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -34,17 +35,10 @@ def main():
 
 ##### --- Initialize the argument parser
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
-    parser.add_argument('--em_max_iter', type=int, default=3)
+    parser.add_argument('--em_max_iter', type=int, default=100)
     parser.add_argument('--round', type=int, default=5000)
-    parser.add_argument('--scene_name', type=str, default='Untitled_Scene')
 
     args=parser.parse_args()
-
-##### --- Create Checkpoint Directory and Path ---
-
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    SCENE_NAME = args.scene_name
-    MODEL_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, f"{SCENE_NAME}.ckpt")
 
 ##### --- Loading Environment & System Configuration ---
     config = utils.load_yaml_config(CONFIG_PATH)
@@ -64,6 +58,11 @@ def main():
     config['X_WIDTH'] = x_width
     config['Y_WIDTH'] = y_width
 
+##### --- Create Checkpoint Directory and Path ---
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    SCENE_NAME = config.get('SCENARIO_NAME', 'Untitled_Scene')
+    MODEL_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, f"{SCENE_NAME}.ckpt")
+
 ##### --- Static Resource Loading and Initialization ---
     try:
         mat = scipy.io.loadmat("directions.mat")
@@ -75,18 +74,35 @@ def main():
 
     device = DEVICE
 
-    data_queue = Queue()  # CSI2TRAJECTORY Worker -> TRANSFORMER Worker
+##### --- Create 3 Queue and KeyboardInterrupt Stop Event ---
+    csi_data_queue = Queue() # CSI Blocks Producter -> CSI2TRAJECTORY Worker
+    trajectory_queue = Queue()  # CSI2TRAJECTORY Worker -> TRANSFORMER Worker
     model_queue = Queue() # TRANSFORMER Worker -> CSI2TRAJECTORY Worker
     stop_event = Event()
+
+##### --- Load and Process CSI dataset ---
+    csi_blocks_list = utils.load_and_preprocess_csi_dataset(
+        dataset_folder=DATASET_FOLDER,
+        config=config,
+        device=device
+    )
+
+    if csi_blocks_list:
+        for csi_block in csi_blocks_list:
+            csi_data_queue.put(csi_block)
+        print(f"\n[Pipeline] Queued {len(csi_blocks_list)} CSI blocks for processing.")
+    else:
+        print("[Pipeline] No CSI blocks generated. Exiting.")
+        return
 
 ##### --- Processes for the Two-stage Pipeline
     csi2trajectory_worker_process = Process(
         target=CSI2TRAJECTORY_worker, 
-        args=(data_queue, model_queue, config, reference_grid, DIRECTIONS_VECTORS, device)
+        args=(csi_data_queue, trajectory_queue, model_queue, config, reference_grid, DIRECTIONS_VECTORS, device)
     )
     transformer_worker_process = Process(
         target=TRANSFORMER_worker, 
-        args=(data_queue, model_queue, config, DIRECTIONS_VECTORS, MODEL_CHECKPOINT_PATH, stop_event, device)
+        args=(trajectory_queue, model_queue, config, DIRECTIONS_VECTORS, MODEL_CHECKPOINT_PATH, stop_event, device)
     )
 
 ##### --- Start the Concurrent Execution of the Two Worker Processes
@@ -118,7 +134,8 @@ def main():
 ##############################################
 
 def CSI2TRAJECTORY_worker(
-    data_queue: Queue, 
+    csi_data_queue: Queue,
+    trajectory_queue: Queue, 
     model_queue: Queue, 
     config: Dict[str, Any], 
     reference_grid: Any,
@@ -171,6 +188,11 @@ def CSI2TRAJECTORY_worker(
     try:
         while round_counter < config['ROUND']: # use while when it is RT system
 
+            if not csi_data_queue.empty():  
+                current_csi_block = csi_data_queue.get()
+            else:
+                continue
+
             # Check Whether There is a New Transformer Model can be Used
             if not model_queue.empty():
                 new_model_config = model_queue.get()
@@ -200,15 +222,16 @@ def CSI2TRAJECTORY_worker(
                     context=context, 
                     model=model, 
                     mode=mode, 
-                    directions_vectors=directions_vectors
+                    directions_vectors=directions_vectors, 
+                    raw_csi_data=current_csi_block,
                 )
             )
 
-            print("Predicted!!")
+            print(trajectory)
 
             context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
-            data_queue.put(trajectory.clone().detach())
+            trajectory_queue.put(trajectory.clone().detach())
 
             round_counter += 1
             time.sleep(SLEEP)
@@ -225,7 +248,7 @@ def CSI2TRAJECTORY_worker(
 ##############################################
 
 def TRANSFORMER_worker(
-    data_queue: Queue, 
+    trajectory_queue: Queue, 
     model_queue: Queue, 
     config: Dict[str, Any], 
     directions_vectors: np.ndarray, 
@@ -260,7 +283,7 @@ def TRANSFORMER_worker(
     checkpoint_loaded_successfully = False
     if os.path.exists(checkpoint_path):
         try:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=device)
 
             model.load_state_dict(checkpoint['model_state_dict'])
             optim.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -295,8 +318,8 @@ def TRANSFORMER_worker(
     try:
         while not stop_event.is_set():
             # Data Collection
-            if not data_queue.empty():
-                trajectory_buffer.append(data_queue.get())
+            if not trajectory_queue.empty():
+                trajectory_buffer.append(trajectory_queue.get())
                 
             # To Trigger Training
             if len(trajectory_buffer) >= MIN_TRAJECTORIES_TO_TRAIN:
