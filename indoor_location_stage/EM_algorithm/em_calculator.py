@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from torch.distributions import Normal
 
 import utils
+import numpy as np
 from transformer.transformer_tool import transformer_batch_predict_logits
 
 
@@ -42,7 +43,7 @@ def build_gaussian_distribution(mean: torch.Tensor, variance: torch.Tensor) -> N
     
     return gaussian_dist
 
-def calculate_L_tq(
+def calculate_L_qt(
         trajectory: TypeTrajectory, 
         ap_locations: torch.Tensor, 
     ) -> torch.Tensor:
@@ -93,6 +94,41 @@ def select_initial_position(
     start_grid_idx = torch.argmin(distances).item()
 
     return reference_grid[start_grid_idx].unsqueeze(0)
+
+from sklearn.mixture import GaussianMixture
+def estimate_two_gaussians(data_flat: torch.Tensor): # (FIXME:未完成)
+
+    K = 2
+
+    if data_flat.is_cuda:
+        data_np = data_flat.cpu().numpy()
+    else:
+        data_np = data_flat.numpy()
+
+    data_np = data_np.reshape(-1, 1)
+
+    gmm = GaussianMixture(
+        n_components=K,
+        covariance_type='spherical',
+        max_iter=500,
+        tol=1e-6, 
+        init_params='kmeans',
+        n_init=5
+    )
+    gmm.fit(data_np)
+
+    means = gmm.means_.flatten()
+    vars = gmm.covariances_.flatten()
+
+    # sort small mean first
+    idx = np.argsort(vars)
+    means = means[idx]
+    vars = vars[idx]
+
+    # return to tensor on original device
+    device = data_flat.device
+    return torch.tensor(means, device=device, dtype=torch.float32), \
+           torch.tensor(vars, device=device, dtype=torch.float32)
 
 ###########################################
 ##### --- Power's mean & variance --- #####
@@ -278,6 +314,13 @@ def calculate_gamma_qtk(
     log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
     log_pi_k = torch.log(pi_k.clamp(min=1e-10))
 
+    DEBUG = False
+    if DEBUG:
+        print("log_P_power: ", log_P_power[:, 0:5, :])
+        print("log_P_angle: ", log_P_angle[:, 0:5, :])
+        print("log_P_delay: ", log_P_delay[:, 0:5, :])
+        print("log_pi_k: ", log_pi_k)
+
     log_unnormalized_prob_qtk = (
         log_pi_k                            
         + log_P_power
@@ -453,7 +496,7 @@ def calculate_emission_probability(
 
 ##### --- Incorporate Global LOS Prior pi_k ---
     # (K) -> (1, 1, 1, K) -> (G, Q, T, K)
-    pi_k = propagation_params['pi_global_LOS_ratio'].to(DEVICE)
+    pi_k = propagation_params['pi_k'].to(DEVICE)
     log_pi_k_111k = torch.log(pi_k.clamp(min=1e-10)).view(1, 1, 1, K)
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
@@ -503,7 +546,8 @@ def gaussian_log_pdf(
         mean: torch.Tensor, 
         variance: torch.Tensor, 
 ) -> torch.Tensor:
-    variance = torch.clamp(variance, min=1e-6)
+    MIN_VAR_FOR_MODEL = 1e-4
+    variance = torch.clamp(variance, min=MIN_VAR_FOR_MODEL)
 
     log_prob = -0.5 * torch.log(2.0 * torch.pi * variance) - 0.5 * (x - mean)**2 / variance
 

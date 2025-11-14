@@ -187,7 +187,7 @@ class MMP_Algorithm:
         denominator = 2 * torch.pi * self.d_antenna_spacing
 
         sin_phi_term = (numerator / denominator).real
-        aoa_radians = torch.arcsin(sin_phi_term)
-        aoa_degrees = aoa_radians * (180.0 / torch.pi)
+        aoa_radians = torch.arcsin(sin_phi_term)        # arcsin range: (-pi/2, pi/2)
+        aoa_degrees = aoa_radians * (180.0 / torch.pi)  # degree range: (-90, 90)
 
         return aoa_degrees

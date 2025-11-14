@@ -17,11 +17,10 @@ def estimate_delay_batch(
     mean_delay = adjusted_tof_tensor.sum(dim=1, keepdim=True)
 
 ##### --- Weighted Standard Deviation of Delay ---
-
     diff_squared = (tof_tensor - mean_delay).pow(2)
     weighted_variance = weight_tensor * diff_squared
     std_dev_delay = torch.sqrt(weighted_variance.sum(dim=1, keepdim=True))
-    
+
 ##### --- Unit Conversion ---
     log10_std_dev = torch.log10(std_dev_delay).squeeze()
     delay_tensor_flat = 10 * log10_std_dev

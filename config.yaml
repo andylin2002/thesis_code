@@ -33,15 +33,15 @@ BUFFER_DISTANCE_M: 0
 ### --- 2. System Setup --- ###
 CSI_DIMENSIONS:
   NUM_RX_ANTENNAS: 3                      # notation: N
-  NUM_SUBCARRIERS: 21                     # notation: M @@@
+  NUM_SUBCARRIERS: 21                     # notation: M
   
 # --- Frequency & Inter-element Spacing ---
-CARRIER_FREQUENCY_HZ: 5180000000.0
+CARRIER_FREQUENCY_HZ: 5170000000.0
 CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 2                           # notation: T
+NUM_SAMPLE: 42                           # notation: T
 NUM_PACKET: 1                           # notation: P
 
 ### --- 3. Controller Setup --- ###

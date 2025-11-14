@@ -35,7 +35,7 @@ def main():
 
 ##### --- Initialize the argument parser
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
-    parser.add_argument('--em_max_iter', type=int, default=100)
+    parser.add_argument('--em_max_iter', type=int, default=20)
     parser.add_argument('--round', type=int, default=5000)
 
     args=parser.parse_args()
@@ -158,13 +158,9 @@ def CSI2TRAJECTORY_worker(
     epsilon = 1e-6
     random_noise = torch.rand(Q, T, 2, device=device) * epsilon
 
-    APs_LOS_ratio_symmetric = torch.full((Q, T, 2), 0.5, dtype=torch.float32, device=device)
-    APs_LOS_ratio = APs_LOS_ratio_symmetric + random_noise
-
 ##### --- Dynamic parameters ---
     context = {
         'last_predicted_point': None,
-        'APs_LOS_ratio': APs_LOS_ratio
     }
 
     print("[CSI2TRAJ] Waiting for initial Transformer model state from Worker...")
@@ -227,7 +223,9 @@ def CSI2TRAJECTORY_worker(
                 )
             )
 
-            print(trajectory)
+            DEBUG = False
+            if DEBUG:
+                print(trajectory)
 
             context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
