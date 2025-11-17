@@ -40,6 +40,11 @@ class EM_Algorithm:
         self.num_sample = config['NUM_SAMPLE']
 
         self.ap_locations = emc.get_ap_locations(self.config, self.num_ap, DEVICE)
+        self.ap_orientations = torch.tensor(
+            [data.get('ORIENTATION_DEG', 0) for data in self.ap_data.values()], 
+            dtype=torch.float32, 
+            device=DEVICE
+        )
 
     ##### --- Initialization ---
         self.MEPLL_PropParams = -torch.inf
@@ -58,7 +63,7 @@ class EM_Algorithm:
             DEBUG = False
             if DEBUG:
                 #print("pi_k: ", self.propagation_params['pi_k'])
-                print("gamma_qtk: ", self.propagation_params['gamma_qtk'][0, :, :])
+                print("gamma_qtk: ", self.propagation_params['gamma_qtk'][0, 0, :])
             
             if self._check_convergence():
                 break
@@ -70,7 +75,7 @@ class EM_Algorithm:
         Q = self.num_ap
         T = self.num_sample
         K = 2 # LOS and NLOS
-        MIN_VAR = 1e-4
+        MIN_VAR = 1
 
         # Initialize all learned propagation parameters
         alpha_qk =      torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
@@ -87,16 +92,24 @@ class EM_Algorithm:
         angle_qt = self.feature_matrix[:, :, 1]
         delay_qt = self.feature_matrix[:, :, 2]
 
+        DEBUG = False
+        if DEBUG:
+            print("power_qt: ", power_qt)
+            print("angle_qt: ", angle_qt)
+            print("delay_qt: ", delay_qt)
+
         # Cluster Power for each AP independently and assign variances
+        init_power_qk_means = torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
         for q in range(Q):
             power_q_flat = power_qt[q, :]
-            _, power_vars = emc.estimate_two_gaussians(power_q_flat)
+            power_means, power_vars = emc.estimate_two_gaussians(power_q_flat)
+            init_power_qk_means[q, :].copy_(power_means)
             power_qk_var[q, :].copy_(power_vars.clamp(min=MIN_VAR))
 
-        # Cluster Angle data globally and assign variances
-        angle_flat = angle_qt.flatten()
-        _, angle_vars = emc.estimate_two_gaussians(angle_flat)
-        angle_k_var.copy_(angle_vars.clamp(min=MIN_VAR))
+            DEBUG = False
+            if DEBUG:
+                print(f"power_means[{q}]: ", power_means)
+                print(f"power_vars[{q}]: ", power_vars)
 
         # Cluster Delay data globally and assign means and variances
         delay_flat = delay_qt.flatten()
@@ -106,8 +119,10 @@ class EM_Algorithm:
 
         DEBUG = True
         if DEBUG:
+            print("power_means: ", power_means)
             print("power_vars: ", power_vars)
-            print("angle_vars: ", angle_vars)
+            #print("angle_means: ", angle_means)
+            #print("angle_vars: ", angle_vars)
             print("delay_means: ", delay_means)
             print("delay_vars: ", delay_vars)
 
@@ -120,7 +135,9 @@ class EM_Algorithm:
             'delay_k_mean':         delay_k_mean,           # shape: (K)    
             'delay_k_var':          delay_k_var,            # shape: (K)   
             'pi_k':                 pi_k,                   # shape: (K)
-            'gamma_qtk':            gamma_qtk               # shape: (Q, T, K)
+            'gamma_qtk':            gamma_qtk,              # shape: (Q, T, K)
+
+            'init_power_qk_means':  init_power_qk_means
         }
 
         return propagation_params
@@ -174,36 +191,48 @@ class EM_Algorithm:
     ##### --- Initialize Constants ---
         L_qt = emc.calculate_L_qt(trajectory, self.ap_locations)
 
-        angle_qt_mean = emc.calculate_angle_qt_mean(trajectory, self.ap_locations)
+        angle_qt_mean = emc.calculate_angle_qt_mean(trajectory, self.ap_locations, self.ap_orientations)
         angle_qt1_mean = angle_qt_mean.unsqueeze(2)
 
     ##### --- Initialize Gamma[Q, T, K] ---
-        power_qt1_mean = power_qt.unsqueeze(2)
-        power_q1k_var = propagation_params['power_qk_var'].unsqueeze(1)
+        # FIXME
+        #power_q1k_mean = propagation_params['init_power_qk_means'].unsqueeze(1)
+        #power_q1k_var = propagation_params['power_qk_var'].unsqueeze(1)
+        # FIXME
+        power_q1k_mean = power_qt.mean()
+        power_q1k_var = power_qt.var()
+
         power_distribution_qtk = (
             emc.build_gaussian_distribution(
-                power_qt1_mean, 
+                power_q1k_mean, 
                 power_q1k_var
             )
         )
 
         # angle_qt1_mean already defined
-        angle_11k_var = propagation_params['angle_k_var']
-        angle_distribution_qtk = (
-                emc.build_gaussian_distribution(
-                    angle_qt1_mean, 
-                    angle_11k_var
+        angle_11k_var = (
+                emc.calculate_angle_k_var(
+                    angle_qt_mean, 
+                    angle_qt, 
+                    propagation_params['gamma_qtk'] # Arithmetic Variance (Initial gamma: full 0.5)
                 )
+            ).view(1, 1, -1)
+
+        angle_distribution_qtk = (
+            emc.build_gaussian_distribution(
+                angle_qt1_mean, 
+                angle_11k_var
             )
+        )
         
         delay_11k_mean = propagation_params['delay_k_mean'].view(1, 1, -1)
         delay_11k_var = propagation_params['delay_k_var'].view(1, 1, -1)
         delay_distribution_qtk = (
-                emc.build_gaussian_distribution(
-                    delay_11k_mean, 
-                    delay_11k_var
-                )
+            emc.build_gaussian_distribution(
+                delay_11k_mean, 
+                delay_11k_var
             )
+        )
 
         propagation_params['gamma_qtk'] = (
             emc.calculate_gamma_qtk(
@@ -216,6 +245,10 @@ class EM_Algorithm:
                 delay_qt
             )
         )
+
+        DEBUG = False
+        if DEBUG:
+            print(propagation_params['gamma_qtk'][:, :10, :])
 
     ##### --- Maximize 'Marginal Emission Probability Log Likelihood' until converge ---
         MAX_MEPLL_PropParams = -torch.inf
@@ -260,6 +293,12 @@ class EM_Algorithm:
                     L_qt
                 )
             )
+
+            DEBUG = False
+            if DEBUG:
+                diff = abs(power_qtk_mean[0, 0, 0] - power_qt[0, 0])
+                print("diff of power: ", diff)
+
             propagation_params['power_qk_var'] = (
                 emc.calculate_power_qk_var(
                     power_qt,
@@ -349,16 +388,6 @@ class EM_Algorithm:
                 )
             )
 
-            # FIXME: DEBUG
-            DEBUG = False
-            if DEBUG:
-                print(f"  MEPLL_New: {MEPLL_PropParams_new:.4f} vs Old_Max: {MAX_MEPLL_PropParams:.4f}")
-                print(f"  Alpha (LOS/NLOS):\n{propagation_params['alpha_qk']}")
-                print(f"  Beta (LOS/NLOS):\n{propagation_params['beta_qk']}")
-                print(f"  Power Var (LOS/NLOS):\n{propagation_params['power_qk_var']}")
-                print(f"  Delay Var (LOS/NLOS):\n{propagation_params['delay_k_var']}")
-                print(f"  Global Pi (LOS/NLOS): {propagation_params['pi_k']}")
-
         ##### --- Check Whether 'findPropParams_step' is convergent ---
             if MEPLL_PropParams_new > MAX_MEPLL_PropParams + 1e-4:
                 MAX_MEPLL_PropParams = MEPLL_PropParams_new
@@ -368,6 +397,17 @@ class EM_Algorithm:
                 self.propagation_params = propagation_params_old 
                 propagation_params['gamma_qtk'] = propagation_params_old['gamma_qtk']
                 break
+
+        DEBUG = True
+        if DEBUG:
+            #print(f"  MEPLL_New: {MEPLL_PropParams_new:.4f} vs Old_Max: {MAX_MEPLL_PropParams:.4f}")
+            #print(f"  Alpha (LOS/NLOS):\n{propagation_params['alpha_qk']}")
+            #print(f"  Beta (LOS/NLOS):\n{propagation_params['beta_qk']}")
+            print(f"  Power Var (LOS/NLOS):\n{propagation_params['power_qk_var']}")
+            #print(f"  Angle Var (LOS/NLOS):\n{propagation_params['angle_k_var']}")
+            #print(f"  Delay Var (LOS/NLOS):\n{propagation_params['delay_k_var']}")
+            #print(f"  Global Pi (LOS/NLOS): {propagation_params['pi_k']}")
+            pass
 
         # END while
 
@@ -455,10 +495,6 @@ class EM_Algorithm:
                 MEPLL_Trajectory, chosen_index = torch.max(delta[:, tgt_index], dim=0)
                 trajectory_index_sequence = path[chosen_index, :, tgt_index]
                 self.trajectory = reference_grid[trajectory_index_sequence]
-
-                DEBUG = False
-                if DEBUG:
-                    print("predicted trajectory: ", self.trajectory)
 
         self.MEPLL_Trajectory = MEPLL_Trajectory
 

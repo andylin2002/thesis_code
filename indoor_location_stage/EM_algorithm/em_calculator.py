@@ -96,39 +96,65 @@ def select_initial_position(
     return reference_grid[start_grid_idx].unsqueeze(0)
 
 from sklearn.mixture import GaussianMixture
-def estimate_two_gaussians(data_flat: torch.Tensor): # (FIXME:未完成)
+def estimate_two_gaussians(data_flat: torch.Tensor):
 
     K = 2
+    length = len(data_flat)
+    min_length = length / 2
+    device = data_flat.device
 
     if data_flat.is_cuda:
         data_np = data_flat.cpu().numpy()
     else:
         data_np = data_flat.numpy()
 
+    # Remove invalid element
+    data_np[data_np == -90.0] = np.nan
+    data_np = data_np[~np.isnan(data_np)]
+
+    if data_np.size < min_length:
+        mean = np.mean(data_np) if data_np.size > 0 else 0.0
+        var = np.var(data_np) if data_np.size > 0 else 1.0
+        means = np.array([mean, mean])
+        vars = np.array([var, var])
+        return torch.tensor(means, dtype=torch.float32, device=device), \
+               torch.tensor(vars, dtype=torch.float32, device=device)
+    
     data_np = data_np.reshape(-1, 1)
 
-    gmm = GaussianMixture(
-        n_components=K,
-        covariance_type='spherical',
-        max_iter=500,
-        tol=1e-6, 
-        init_params='kmeans',
-        n_init=5
-    )
-    gmm.fit(data_np)
+    try:
+        gmm = GaussianMixture(
+            n_components=K,
+            covariance_type='spherical',
+            max_iter=500,
+            tol=1e-6, 
+            init_params='kmeans',
+            n_init=5
+        )
+        gmm.fit(data_np)
 
-    means = gmm.means_.flatten()
-    vars = gmm.covariances_.flatten()
+        DEBUG = False
+        if DEBUG:
+            log_likelihood = gmm.score(data_np)
+            print(f"GMM Log-Likelihood: {log_likelihood:.4f}")
 
-    # sort small mean first
-    idx = np.argsort(vars)
-    means = means[idx]
-    vars = vars[idx]
+        means = gmm.means_.flatten()
+        vars = gmm.covariances_.flatten()
+
+        # sort small mean first
+        idx = np.argsort(vars)
+        means = means[idx]
+        vars = vars[idx]
+
+    except Exception as e:
+        mean = np.mean(data_np)
+        var = np.var(data_np)
+        means = np.array([mean, mean])
+        vars = np.array([var, var])
 
     # return to tensor on original device
-    device = data_flat.device
-    return torch.tensor(means, device=device, dtype=torch.float32), \
-           torch.tensor(vars, device=device, dtype=torch.float32)
+    return torch.tensor(means, dtype=torch.float32, device=device), \
+           torch.tensor(vars, dtype=torch.float32, device=device)
 
 ###########################################
 ##### --- Power's mean & variance --- #####
@@ -143,12 +169,12 @@ def calculate_alpha_qk(
     ) -> torch.Tensor:
     
     L_qtk = L_qt.unsqueeze(2)
-    L_qtk_mean = L_qk_average.unsqueeze(1)
-    term_L = L_qtk - L_qtk_mean
+    L_qtk_average = L_qk_average.unsqueeze(1)
+    term_L = L_qtk - L_qtk_average
 
     power_qtk = power_qt.unsqueeze(2)
-    power_qtk_mean = power_qk_average.unsqueeze(1)
-    term_power = power_qtk - power_qtk_mean
+    power_qtk_average = power_qk_average.unsqueeze(1)
+    term_power = power_qtk - power_qtk_average
 
     numerator_term = gamma_qtk * term_L * term_power
     denominator_term = gamma_qtk * (term_L ** 2)
@@ -156,7 +182,9 @@ def calculate_alpha_qk(
     numerator = numerator_term.sum(dim=1)
     denominator = denominator_term.sum(dim=1)
 
+    # TODO: 檢查是否需要abs
     alpha_qk = numerator / denominator.clamp(min=1e-10)
+    alpha_qk = abs(alpha_qk)
 
     return alpha_qk
 
@@ -177,11 +205,11 @@ def calculate_power_qtk_mean(
         L_qt: torch.Tensor    
     ):
 
-    alpha_qtk = alpha_qk.unsqueeze(1)
-    beta_qtk = beta_qk.unsqueeze(1)
-    L_qtk = L_qt.unsqueeze(2)
+    alpha_q1k = alpha_qk.unsqueeze(1)
+    beta_q1k = beta_qk.unsqueeze(1)
+    L_qt1 = L_qt.unsqueeze(2)
 
-    power_qtk_mean = beta_qtk - (alpha_qtk * L_qtk)
+    power_qtk_mean = beta_q1k - (alpha_q1k * L_qt1)
 
     return power_qtk_mean
 
@@ -191,9 +219,9 @@ def calculate_power_qk_var(
         gamma_qtk: torch.Tensor
     ) -> torch.Tensor:
 
-    power_qtk = power_qt.unsqueeze(2)
+    power_qt1 = power_qt.unsqueeze(2)
 
-    squared_error = (power_qtk - power_qtk_mean_predicted) ** 2
+    squared_error = (power_qt1 - power_qtk_mean_predicted) ** 2
     weighted_squared_error = gamma_qtk * squared_error
 
     numerator = weighted_squared_error.sum(dim=1)
@@ -209,11 +237,12 @@ def calculate_power_qk_var(
 
 def calculate_angle_qt_mean(
         trajectory: TypeTrajectory, 
-        ap_locations: torch.Tensor,   
+        ap_locations: torch.Tensor,
+        ap_orientations: torch.Tensor
     ) -> torch.Tensor:
 
-    ap_locations_expanded = ap_locations.unsqueeze(1)
-    trajectory_expanded = trajectory.unsqueeze(0)
+    ap_locations_expanded = ap_locations.unsqueeze(1) # shape: [Q, (T), 2]
+    trajectory_expanded = trajectory.unsqueeze(0) # shape: [(Q), T, 2]
 
     vector_V_qt = trajectory_expanded - ap_locations_expanded
     x_diff = vector_V_qt[..., 0]
@@ -221,8 +250,12 @@ def calculate_angle_qt_mean(
 
     angle_rad_qt = torch.atan2(y_diff, x_diff)
     angle_deg_qt = torch.rad2deg(angle_rad_qt)
+    angle_deg_qt = torch.fmod(torch.fmod(angle_deg_qt, 360.0) + 360.0, 360.0)
 
-    angle_qt_mean = angle_deg_qt
+    ap_orientations_expanded = ap_orientations.unsqueeze(1).expand_as(angle_deg_qt) # shape: [Q, T]
+    relative_angle_deg = ap_orientations_expanded - angle_deg_qt
+
+    angle_qt_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_qt_mean
 
@@ -263,8 +296,6 @@ def calculate_delay_k_mean(
     delay_k_mean = numerator / denominator.clamp(min=1e-10)
 
     return delay_k_mean
-
-    pass
 
 def calculate_delay_k_var(
         delay_k_mean: torch.Tensor, 
@@ -316,9 +347,9 @@ def calculate_gamma_qtk(
 
     DEBUG = False
     if DEBUG:
-        print("log_P_power: ", log_P_power[:, 0:5, :])
-        print("log_P_angle: ", log_P_angle[:, 0:5, :])
-        print("log_P_delay: ", log_P_delay[:, 0:5, :])
+        print("log_P_power: ", log_P_power[0, 0, :])
+        print("log_P_angle: ", log_P_angle[0, 0, :])
+        print("log_P_delay: ", log_P_delay[0, 0, :])
         print("log_pi_k: ", log_pi_k)
 
     log_unnormalized_prob_qtk = (
@@ -501,6 +532,14 @@ def calculate_emission_probability(
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
 ##### --- Emission Probability ---
+
+    DEBUG = False
+    if DEBUG:
+        print("log_pi_k_gqtk[0, 0, 0, :]: ", log_pi_k_gqtk[0, 0, 0, :])
+        print("log_P_power_gqtk[0, 0, 0, :]: ", log_P_power_gqtk[0, 0, 0, :])
+        print("log_P_angle_gqtk[0, 0, 0, :]: ", log_P_angle_gqtk[0, 0, 0, :])
+        print("log_P_delay_gqtk[0, 0, 0, :]: ", log_P_delay_gqtk[0, 0, 0, :])
+
     log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
     log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
     emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
@@ -633,6 +672,12 @@ def update_delta_and_path(
     T = path.shape[1]
 
 ##### --- Update delta ---
+
+    DEBUG = False
+    if DEBUG:
+        print("current_emission_log_prob: ", current_emission_log_prob[0:2])
+        print("max_value: ", max_value[0:2])
+
     delta[:, tgt_index] = current_emission_log_prob + max_value
 
 ##### --- Update path

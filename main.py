@@ -12,7 +12,7 @@ from transformer.transformer_tool import convert_long_trajectory_to_ids, create_
 from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
-DATASET_FOLDER = 'dataset'
+DATASET_FOLDER = 'dataset_1'
 CHECKPOINT_DIR = 'checkpoint'
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -223,7 +223,7 @@ def CSI2TRAJECTORY_worker(
                 )
             )
 
-            DEBUG = False
+            DEBUG = True
             if DEBUG:
                 print(trajectory)
 

@@ -171,22 +171,26 @@ class MMP_Algorithm:
     def _eigv_y_to_tof(self, eigv_y: torch.Tensor) -> torch.Tensor:
 
         ln_y = torch.log(eigv_y)
+        ln_y_imag = ln_y.imag
 
-        numerator = 1j * self.M_subcarrier * ln_y
+        numerator = -1 * self.M_subcarrier * ln_y_imag
         denominator = 2 * torch.pi * self.B_channel_bandwith_hz
 
-        tof_tensor = (numerator / denominator).real
+        tof_tensor = (numerator / denominator)
 
         return tof_tensor
 
     def _eigv_x1_to_aoa(self, eigv_x1: torch.Tensor) -> torch.Tensor:
 
         ln_x1 = torch.log(eigv_x1)
+        ln_x1_imag = ln_x1.imag
 
-        numerator = 1j * self.wavelength * ln_x1
+        numerator = -1 * self.wavelength * ln_x1_imag
         denominator = 2 * torch.pi * self.d_antenna_spacing
 
-        sin_phi_term = (numerator / denominator).real
+        sin_phi_term = (numerator / denominator)
+        sin_phi_term = torch.clamp(sin_phi_term, min=-1.0, max=1.0)
+
         aoa_radians = torch.arcsin(sin_phi_term)        # arcsin range: (-pi/2, pi/2)
         aoa_degrees = aoa_radians * (180.0 / torch.pi)  # degree range: (-90, 90)
 

@@ -28,8 +28,7 @@ def run_csi_analysis(
     )
 
     # (FIXME: DEBUG)=======================================
-    print(feature_matrix[3, :, 1]) # angle for AP1
-    DEBUG = False
+    DEBUG = True
     if DEBUG:
         if feature_matrix is not None:
             print("\n[DEBUG] Feature Matrix (F) Check:")
@@ -41,28 +40,25 @@ def run_csi_analysis(
             # F[:, :, 2] -> Delay
             
             # 1. 計算 Power (索引 0) 的統計量
+            print("\n  --- Power Features (索引 0) ---")
             power_features = feature_matrix[:, :, 0]
             print(power_features[0, :])
-
-            print("\n  --- Power Features (索引 0) ---")
             print(f"  Max/Min: {torch.max(power_features):.4f} / {torch.min(power_features):.4f}")
             print(f"  Mean: {torch.mean(power_features):.6f}")
             print(f"  Std Dev: {torch.std(power_features):.6f}")
 
             # 2. 計算 Angle (索引 1) 的統計量
+            print("\n  --- Angle Features (索引 1) ---")
             angle_features = feature_matrix[:, :, 1]
             print(angle_features[0, :])
-
-            print("\n  --- Angle Features (索引 1) ---")
             print(f"  Max/Min: {torch.max(angle_features):.4f} / {torch.min(angle_features):.4f}")
             print(f"  Mean: {torch.mean(angle_features):.6f}")
             print(f"  Std Dev: {torch.std(angle_features):.6f}")
             
             # 3. 計算 Delay (索引 2) 的統計量
+            print("\n  --- Delay Features (索引 2) ---")
             delay_features = feature_matrix[:, :, 2]
             print(delay_features[0, :])
-
-            print("\n  --- Delay Features (索引 2) ---")
             print(f"  Max/Min: {torch.max(delay_features):.4f} / {torch.min(delay_features):.4f}")
             print(f"  Mean: {torch.mean(delay_features):.6f}")
             print(f"  Std Dev: {torch.std(delay_features):.6f}")
