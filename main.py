@@ -223,10 +223,6 @@ def CSI2TRAJECTORY_worker(
                 )
             )
 
-            DEBUG = True
-            if DEBUG:
-                print(trajectory)
-
             context['last_predicted_point'] = trajectory[-1:].clone().detach()
 
             trajectory_queue.put(trajectory.clone().detach())

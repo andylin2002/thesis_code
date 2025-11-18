@@ -133,11 +133,6 @@ def estimate_two_gaussians(data_flat: torch.Tensor):
         )
         gmm.fit(data_np)
 
-        DEBUG = False
-        if DEBUG:
-            log_likelihood = gmm.score(data_np)
-            print(f"GMM Log-Likelihood: {log_likelihood:.4f}")
-
         means = gmm.means_.flatten()
         vars = gmm.covariances_.flatten()
 
@@ -345,13 +340,6 @@ def calculate_gamma_qtk(
     log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
     log_pi_k = torch.log(pi_k.clamp(min=1e-10))
 
-    DEBUG = False
-    if DEBUG:
-        print("log_P_power: ", log_P_power[0, 0, :])
-        print("log_P_angle: ", log_P_angle[0, 0, :])
-        print("log_P_delay: ", log_P_delay[0, 0, :])
-        print("log_pi_k: ", log_pi_k)
-
     log_unnormalized_prob_qtk = (
         log_pi_k                            
         + log_P_power
@@ -532,14 +520,6 @@ def calculate_emission_probability(
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
 ##### --- Emission Probability ---
-
-    DEBUG = False
-    if DEBUG:
-        print("log_pi_k_gqtk[0, 0, 0, :]: ", log_pi_k_gqtk[0, 0, 0, :])
-        print("log_P_power_gqtk[0, 0, 0, :]: ", log_P_power_gqtk[0, 0, 0, :])
-        print("log_P_angle_gqtk[0, 0, 0, :]: ", log_P_angle_gqtk[0, 0, 0, :])
-        print("log_P_delay_gqtk[0, 0, 0, :]: ", log_P_delay_gqtk[0, 0, 0, :])
-
     log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
     log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
     emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
@@ -672,12 +652,6 @@ def update_delta_and_path(
     T = path.shape[1]
 
 ##### --- Update delta ---
-
-    DEBUG = False
-    if DEBUG:
-        print("current_emission_log_prob: ", current_emission_log_prob[0:2])
-        print("max_value: ", max_value[0:2])
-
     delta[:, tgt_index] = current_emission_log_prob + max_value
 
 ##### --- Update path
