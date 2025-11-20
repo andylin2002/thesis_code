@@ -35,7 +35,7 @@ def main():
 
 ##### --- Initialize the argument parser
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
-    parser.add_argument('--em_max_iter', type=int, default=20)
+    parser.add_argument('--em_max_iter', type=int, default=100)
     parser.add_argument('--round', type=int, default=5000)
 
     args=parser.parse_args()
@@ -222,6 +222,10 @@ def CSI2TRAJECTORY_worker(
                     raw_csi_data=current_csi_block,
                 )
             )
+
+            DEBUG = True
+            if DEBUG:
+                print("final: ", trajectory)
 
             context['last_predicted_point'] = trajectory[-1:].clone().detach()
 

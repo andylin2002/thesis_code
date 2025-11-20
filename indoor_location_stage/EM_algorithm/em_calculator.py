@@ -109,6 +109,7 @@ def estimate_two_gaussians(data_flat: torch.Tensor):
         data_np = data_flat.numpy()
 
     # Remove invalid element
+    data_np = data_np.astype(float)
     data_np[data_np == -90.0] = np.nan
     data_np = data_np[~np.isnan(data_np)]
 
@@ -129,7 +130,8 @@ def estimate_two_gaussians(data_flat: torch.Tensor):
             max_iter=500,
             tol=1e-6, 
             init_params='kmeans',
-            n_init=5
+            n_init=5, 
+            reg_covar=1e-6
         )
         gmm.fit(data_np)
 
@@ -155,6 +157,92 @@ def estimate_two_gaussians(data_flat: torch.Tensor):
 ##### --- Power's mean & variance --- #####
 ###########################################
 
+def calculate_init_alpha_and_beta_qk(
+        reference_grid: torch.Tensor, 
+        ap_locations: torch.Tensor, 
+        power_qt: torch.Tensor, 
+    ) -> torch.Tensor:
+
+    K = 2
+
+    ap_locations_expanded = ap_locations.unsqueeze(1)                           # shape: [Q, 2] -> [Q, 1, 2]
+    reference_grid_expanded = reference_grid.unsqueeze(0)                       # shape: [G, 2] -> [1, G, 2]
+
+    diff = ap_locations_expanded - reference_grid_expanded                      # shape: [Q, G, 2]
+    distance_square = torch.sum(diff**2, dim=2)                                 # shape: [Q, G]
+    distance = torch.sqrt(distance_square)                                      # shape: [Q, G]
+    max_distance = torch.max(distance, dim=1).values                            # shape: [Q]
+    log_max_distance = torch.log10(max_distance)                                # shape: [Q]
+
+    max_power_q = torch.max(power_qt, dim=1).values                             # shape: [Q]
+    min_power_q = torch.min(power_qt, dim=1).values                             # shape: [Q]
+
+    beta_q = max_power_q
+    alpha_q = (beta_q - min_power_q) / log_max_distance
+
+    beta_q1 = beta_q.unsqueeze(1)                                               # shape: [Q, 1]
+    alpha_q1 = alpha_q.unsqueeze(1)                                             # shape: [Q, 1]
+
+    init_beta_qk = beta_q1.repeat(1, K)                                         # shape: [Q, K]
+    init_alpha_qk = alpha_q1.repeat(1, K)                                       # shape: [Q, K]
+
+    return init_alpha_qk, init_beta_qk
+
+def calculate_init_power_qk_var(
+        reference_grid: torch.Tensor, 
+        ap_locations: torch.Tensor, 
+        alpha_qk: torch.Tensor, 
+        beta_qk: torch.Tensor, 
+        power_qt: torch.Tensor
+    ) -> torch.Tensor:
+
+    K = 2
+
+    L_gq = calculate_L_gq(reference_grid, ap_locations)
+
+    alpha_q = alpha_qk[:, 0]
+    beta_q = beta_qk[:, 0]
+    alpha_1q = alpha_q.unsqueeze(0)
+    beta_1q = beta_q.unsqueeze(0)
+
+    power_gq_mean = beta_1q - (alpha_1q * L_gq)
+    power_gq1_mean = power_gq_mean.unsqueeze(2)
+
+    power_1qt = power_qt.unsqueeze(0)
+
+    error_gqt = abs(power_1qt - power_gq1_mean)
+    min_error_qt = torch.min(error_gqt, dim=0).values  # find the most probable point(g) for each q and t
+    squared_min_error_qt = min_error_qt**2
+
+    power_q_var = torch.mean(squared_min_error_qt, dim=1)
+    power_q1_var = power_q_var.unsqueeze(1)
+    init_power_qk_var = power_q1_var.repeat(1, K)
+
+    return init_power_qk_var
+
+def calculate_init_angle_k_var( # FIXME
+        reference_grid: torch.Tensor, 
+        ap_locations: torch.Tensor,
+        ap_orientations: torch.Tensor, 
+        angle_qt: torch.Tensor, 
+    ) -> torch.Tensor:
+
+    K = 2
+
+    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations)
+    angle_gq1_mean = angle_gq_mean.unsqueeze(2)
+
+    angle_1qt = angle_qt.unsqueeze(0)
+
+    error_gqt = abs(angle_1qt - angle_gq1_mean)
+    min_error_qt = torch.min(error_gqt, dim=0).values  # find the most probable point(g) for each q and t
+    squared_min_error_qt = min_error_qt**2
+
+    angle_var = torch.mean(squared_min_error_qt)
+    angle_k_var = angle_var.repeat(K)
+
+    return angle_k_var
+
 def calculate_alpha_qk(
         power_qt: torch.Tensor, 
         power_qk_average: torch.Tensor, 
@@ -176,10 +264,8 @@ def calculate_alpha_qk(
 
     numerator = numerator_term.sum(dim=1)
     denominator = denominator_term.sum(dim=1)
-
-    # TODO: 檢查是否需要abs
-    alpha_qk = numerator / denominator.clamp(min=1e-10)
-    alpha_qk = abs(alpha_qk)
+    
+    alpha_qk = -1 * numerator / (denominator.clamp(min=1e-10))
 
     return alpha_qk
 
@@ -325,6 +411,21 @@ def calculate_pi(
 
     return pi_k
 
+def calculate_init_gamma_qtk(
+        delay_dist: torch.distributions.Normal,
+        delay_qt: torch.Tensor
+    ) -> torch.Tensor:
+
+    log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
+
+    log_unnormalized_prob_qtk = log_P_delay
+    unnormalized_prob_qtk = torch.exp(log_unnormalized_prob_qtk)
+    normalization_constant = unnormalized_prob_qtk.sum(dim=2, keepdim=True)
+
+    init_gamma_qtk = unnormalized_prob_qtk / normalization_constant.clamp(min=1e-10)
+
+    return init_gamma_qtk
+
 def calculate_gamma_qtk(
         pi_k: torch.Tensor,                     # Shape: (K)
         power_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
@@ -332,7 +433,7 @@ def calculate_gamma_qtk(
         delay_dist: torch.distributions.Normal, # Batch Shape: (Q, T, K)
         power_qt: torch.Tensor,                 # Shape: (Q, T)
         angle_qt: torch.Tensor,                 # Shape: (Q, T)
-        delay_qt: torch.Tensor,                 # Shape: (Q, T)
+        delay_qt: torch.Tensor                  # Shape: (Q, T)
     ) -> torch.Tensor:
 
     log_P_power = power_dist.log_prob(power_qt.unsqueeze(2))
@@ -343,7 +444,7 @@ def calculate_gamma_qtk(
     log_unnormalized_prob_qtk = (
         log_pi_k                            
         + log_P_power
-        + log_P_angle 
+        + log_P_angle
         + log_P_delay
     )
 
@@ -366,22 +467,28 @@ def calculate_MEPLL_PropParams(
         power_qt: torch.Tensor,                 # Shape: (Q, T)
         angle_qt: torch.Tensor,                 # Shape: (Q, T)
         delay_qt: torch.Tensor,                 # Shape: (Q, T)
-        gamma_qtk: torch.Tensor                 # Shape: (Q, T, K)
     ) -> torch.Tensor:
 
-    K = gamma_qtk.shape[2]
-
-    log_P_power = power_dist.log_prob(power_qt.unsqueeze(2))
-    log_P_angle = angle_dist.log_prob(angle_qt.unsqueeze(2))
-    log_P_delay = delay_dist.log_prob(delay_qt.unsqueeze(2))
+    log_P_power_qtk = power_dist.log_prob(power_qt.unsqueeze(2))
+    log_P_angle_qtk = angle_dist.log_prob(angle_qt.unsqueeze(2))
+    log_P_delay_qtk = delay_dist.log_prob(delay_qt.unsqueeze(2))
     log_pi_k = torch.log(pi_k.clamp(min=1e-10))
 
     log_joint_prob_qtk = (
         log_pi_k
-        + log_P_power 
-        + log_P_angle
-        + log_P_delay
+        + log_P_power_qtk 
+        + log_P_angle_qtk
+        + log_P_delay_qtk
     )
+
+    DEBUG = True
+    if DEBUG:
+        q = 0
+        t = 0
+        print("log_pi_k: ", log_pi_k)
+        print("log_P_power: ", log_P_power_qtk[q][t])
+        print("log_P_angle: ", log_P_angle_qtk[q][t])
+        print("log_P_delay: ", log_P_delay_qtk[q][t])
 
     log_marginal_likelihood_qt = torch.logsumexp(log_joint_prob_qtk, dim=2)
 
@@ -445,6 +552,7 @@ def calculate_emission_probability(
         reference_grid: torch.Tensor,
         propagation_params: Dict[str, Any], 
         ap_locations: torch.Tensor, 
+        ap_orientations: torch.Tensor, 
         device: torch.device
 ) -> torch.Tensor:
     
@@ -476,7 +584,7 @@ def calculate_emission_probability(
     L_gq11 = L_gq.unsqueeze(2).unsqueeze(3)
 
     # Calculate geometric angle mean for each grid point g to each AP q, shape (G, Q)
-    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations).to(DEVICE)
+    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations).to(DEVICE)
     # Reshape for broadcasting to (G, Q, 1, 1)
     angle_gq11_mean = angle_gq_mean.unsqueeze(2).unsqueeze(3)
     
@@ -520,6 +628,33 @@ def calculate_emission_probability(
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
 ##### --- Emission Probability ---
+
+    DEBUG = False
+    if DEBUG:
+        print("**** point47 AP2 t=0 ****")
+        print("power_gqtk: ", power_gqtk[47, 1, 0]), 
+        print("power_gqtk_mean: ", power_gqtk_mean[47, 1, 0])
+        print("power_gqtk_var: ", power_gqtk_var[47, 1, 0])
+
+        print("**** point50 AP2 t=0 ****")
+        print("power_gqtk: ", power_gqtk[50, 1, 0]), 
+        print("power_gqtk_mean: ", power_gqtk_mean[50, 1, 0])
+        print("power_gqtk_var: ", power_gqtk_var[50, 1, 0])
+
+    DEBUG = False
+    if DEBUG:
+        print("########## point47 ##########")
+        print("log_pi_k_gqtk: ", log_pi_k_gqtk[47, :, 0])
+        print("log_P_power_gqtk: ", log_P_power_gqtk[47, :, 0])
+        print("log_P_angle_gqtk: ", log_P_angle_gqtk[47, :, 0])
+        print("log_P_delay_gqtk: ", log_P_delay_gqtk[47, :, 0])
+        print("\n")
+        print("########## point50 ##########")
+        print("log_pi_k_gqtk: ", log_pi_k_gqtk[50, :, 0])
+        print("log_P_power_gqtk: ", log_P_power_gqtk[50, :, 0])
+        print("log_P_angle_gqtk: ", log_P_angle_gqtk[50, :, 0])
+        print("log_P_delay_gqtk: ", log_P_delay_gqtk[50, :, 0])
+
     log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
     log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
     emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
@@ -529,6 +664,7 @@ def calculate_emission_probability(
 def calculate_angle_gq_mean(
         reference_grid: torch.Tensor, # Shape [G, 2]
         ap_locations: torch.Tensor, 
+        ap_orientations: torch.Tensor
 ) -> torch.Tensor:
     
     ap_locations_expanded = ap_locations.unsqueeze(0)     # Shape [1, Q, 2]
@@ -541,7 +677,12 @@ def calculate_angle_gq_mean(
     angle_rad_gq = torch.atan2(y_diff, x_diff)
     angle_deg_gq = torch.rad2deg(angle_rad_gq)
 
-    angle_gq_mean = angle_deg_gq
+    angle_deg_gq = torch.fmod(torch.fmod(angle_deg_gq, 360.0) + 360.0, 360.0)
+
+    ap_orientations_expanded = ap_orientations.unsqueeze(0).expand_as(angle_deg_gq) # shape: [Q, T]
+    relative_angle_deg = ap_orientations_expanded - angle_deg_gq
+
+    angle_gq_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_gq_mean
 
@@ -577,7 +718,7 @@ def gaussian_log_pdf(
 ##### --- Ping-Pong Updating step --- #####
 ###########################################
 
-def get_winner_neighbor_info(
+def get_winner_neighbor_info( # FIXME 仔細檢查這裡每一步（如果參數更新沒錯那就是這裡錯，我發現參數才更新一次預測出來的路徑就整個不對，應該有問題）
     t: int, 
     reference_grid: torch.Tensor, 
     ref_index: int, 
@@ -635,6 +776,13 @@ def get_winner_neighbor_info(
         row_indices_j,
         G_winner_neighbor_relative_position
     ]
+
+    DEBUG = False
+    if DEBUG:
+        if t == 1:
+            print("score_g_9: ", score_g_9)
+            #print("G_winner_neighbor_relative_position: ", G_winner_neighbor_relative_position)
+            #print("max_value: ", max_value)
     
     return G_winner_neighbor_index, max_value
 
