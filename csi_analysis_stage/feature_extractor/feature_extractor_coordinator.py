@@ -33,7 +33,19 @@ def run_feature_extractor(
     )
 
 ##### --- Delay ---
-    delay_tensor_flat = delay_estimator.estimate_delay_batch(tof_tensor, eigv_x, eigv_y)
+    if config['USE_BASELINE']:
+        magnitude_csi = batch_input_csi.abs()
+        variance_tensor = torch.var(magnitude_csi.reshape(num_batch, -1), dim=1)
+        delay_tensor_flat = 10 * torch.log10(variance_tensor + 1e-9)
+    else:   # MYMETHOD
+        delay_tensor_flat = (
+            delay_estimator.estimate_delay_batch(
+                batch_input_csi, 
+                tof_tensor, 
+                eigv_x, 
+                eigv_y
+            )
+        )
 
 ##### --- Stacking & Reshape ---
     features_stacked_flat = torch.stack([

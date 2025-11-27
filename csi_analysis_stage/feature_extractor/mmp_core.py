@@ -27,11 +27,9 @@ class MMP_Algorithm:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
     ##### --- Construct CSI Enhance Matrix ---
-        
         input_csi_enhance = self._construct_enhance_matrix(input_csi)
 
     ##### --- Find partition the Unitary Matrix U of the left singular values ---
-
         Us_left_singular_vectors = self._get_left_singular_vectors(input_csi_enhance)
 
     ##### --- ToF ---
@@ -59,12 +57,15 @@ class MMP_Algorithm:
         # eigv_y.shape: (batch, L)
         # eigenvector_matrix.shape: (batch, L, L)
 
-    ##### --- We Can Use 'principal_left_singular_vector' to Find eigv_x1 ---
-        principal_left_singular_vector = eigenvector_matrix[:, :, 0]
-        # principal_left_singular_vector.shape = (batch, L)
-
     ##### --- eigv_y -> ToF ---
         tof_tensor = self._eigv_y_to_tof(eigv_y)
+
+    ##### --- Find Main Path through Min ToF --- TODO:未來可以留著其他aoa增加線索
+        min_tof_values, min_indices = torch.min(tof_tensor, dim=1)
+        batch_size, L, _ = eigenvector_matrix.shape
+        gather_indices = min_indices.view(batch_size, 1, 1).expand(batch_size, L, 1)
+        principal_left_singular_vector = torch.gather(eigenvector_matrix, 2, gather_indices)
+        # principal_left_singular_vector.shape = (batch, L)
 
         return tof_tensor, eigv_y, principal_left_singular_vector
 
@@ -85,8 +86,6 @@ class MMP_Algorithm:
         # eigv_x.shape: (batch, L)
 
     ##### --- Find eigv_x1 ---
-        principal_left_singular_vector = principal_left_singular_vector.unsqueeze(-1)
-
         A = (Us_upper @ principal_left_singular_vector).mH
         B = Us_lower @ principal_left_singular_vector
         C = Us_upper @ principal_left_singular_vector

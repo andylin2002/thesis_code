@@ -234,30 +234,6 @@ def _read_antenna_data_csv(file_path: str, N: int) -> Optional[np.ndarray]:
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return None
-
-
-# (TODO: 等到load dataset完成後要把這裡替換掉)
-def load_raw_csi(path, config):
-    """Loads the integrated complex CSI data from a .npy file."""
-    Q = len(config.get('ACCESS_POINTS', {}))
-    T = config['NUM_SAMPLE']
-    P = config['NUM_PACKET']
-    N = config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS']
-    M = config['CSI_DIMENSIONS']['NUM_SUBCARRIERS']
-
-    try:
-        complex_csi = np.load(path)
-        
-        if complex_csi.shape != (Q, (T * P), N, M) or complex_csi.dtype != np.complex64:
-            print(f"Error: Data shape or dtype mismatch in {path}.")
-            print(f"Expected ({T*P}, {Q}, {N}, {M}) and complex64, got {complex_csi.shape} and {complex_csi.dtype}.")
-            return None
-            
-        return complex_csi
-    
-    except FileNotFoundError:
-        print(f"Error: Raw data file not found at {path}. Please check file existence.")
-        return None
     
 def opposite(neighbor_pos: int) -> int:
     

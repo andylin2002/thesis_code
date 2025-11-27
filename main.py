@@ -12,7 +12,6 @@ from transformer.transformer_tool import convert_long_trajectory_to_ids, create_
 from transformer.architecture.noam_opt import NoamOpt
 from transformer.architecture.batch import subsequent_mask
 
-DATASET_FOLDER = 'dataset_1'
 CHECKPOINT_DIR = 'checkpoint'
 CONFIG_PATH = 'config.yaml'
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -37,6 +36,7 @@ def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=100)
     parser.add_argument('--round', type=int, default=5000)
+    parser.add_argument('--use_baseline', type=bool)
 
     args=parser.parse_args()
 
@@ -52,6 +52,8 @@ def main():
 ##### --- Put Hyperparameter into Config ---
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
+    if args.use_baseline:
+        config['USE_BASELINE'] = args.use_baseline
     
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
@@ -82,7 +84,7 @@ def main():
 
 ##### --- Load and Process CSI dataset ---
     csi_blocks_list = utils.load_and_preprocess_csi_dataset(
-        dataset_folder=DATASET_FOLDER,
+        dataset_folder=config['DATASET_FOLDER'],
         config=config,
         device=device
     )
@@ -163,6 +165,9 @@ def CSI2TRAJECTORY_worker(
         'last_predicted_point': None,
     }
 
+    # Initialize and Ready to Save Entire Predicted Trajectory
+    full_trajectory_history = []
+
     print("[CSI2TRAJ] Waiting for initial Transformer model state from Worker...")
     try:
         new_model_config = model_queue.get(timeout=3) # Wait for 3 Seconds
@@ -231,6 +236,12 @@ def CSI2TRAJECTORY_worker(
 
             trajectory_queue.put(trajectory.clone().detach())
 
+            # Save Predicted Trajectory
+            traj_numpy = trajectory.detach().cpu().numpy()
+            full_trajectory_history.append(traj_numpy) 
+            accumulated_path = np.concatenate(full_trajectory_history, axis=0)
+            np.save('predicted_trajectory.npy', accumulated_path)
+
             round_counter += 1
             time.sleep(SLEEP)
 
@@ -254,6 +265,7 @@ def TRANSFORMER_worker(
     stop_event: Event,  # pyright: ignore[reportInvalidTypeForm]
     device: torch.device
 ):
+    """
 ##### --- Parameters Setup ---
     TRAINING_EPOCHS = config['TRAINING_EPOCHS']
     BATCH_SIZE = config['BATCH_SIZE']
@@ -414,6 +426,8 @@ def TRANSFORMER_worker(
         print(f"[TRANSFORMER] Successfully saved final state V{current_version}.")
     except Exception as e:
         print(f"[TRANSFORMER ERROR] Failed to save checkpoint at {checkpoint_path}. Error: {e}")
+
+    """
 
 
 if __name__ == '__main__':

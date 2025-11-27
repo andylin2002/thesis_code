@@ -139,7 +139,7 @@ def estimate_two_gaussians(data_flat: torch.Tensor):
         vars = gmm.covariances_.flatten()
 
         # sort small mean first
-        idx = np.argsort(vars)
+        idx = np.argsort(means)
         means = means[idx]
         vars = vars[idx]
 
@@ -220,26 +220,30 @@ def calculate_init_power_qk_var(
 
     return init_power_qk_var
 
-def calculate_init_angle_k_var( # FIXME
+def calculate_init_angle_k_var(
         reference_grid: torch.Tensor, 
         ap_locations: torch.Tensor,
         ap_orientations: torch.Tensor, 
         angle_qt: torch.Tensor, 
     ) -> torch.Tensor:
 
-    K = 2
-
     angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations)
     angle_gq1_mean = angle_gq_mean.unsqueeze(2)
 
     angle_1qt = angle_qt.unsqueeze(0)
 
-    error_gqt = abs(angle_1qt - angle_gq1_mean)
+    raw_diff = torch.abs(angle_1qt - angle_gq1_mean)
+    diff = torch.fmod(raw_diff, 360.0)
+    error_gqt = torch.min(diff, 360.0 - diff)
     min_error_qt = torch.min(error_gqt, dim=0).values  # find the most probable point(g) for each q and t
-    squared_min_error_qt = min_error_qt**2
 
-    angle_var = torch.mean(squared_min_error_qt)
-    angle_k_var = angle_var.repeat(K)
+    LOS_squared_min_error_qt = min_error_qt**2
+    NLOS_squared_min_error_qt = (min_error_qt + 45)**2
+
+    LOS_angle_var = torch.mean(LOS_squared_min_error_qt)
+    NLOS_angle_var = torch.mean(NLOS_squared_min_error_qt)
+
+    angle_k_var = torch.stack([LOS_angle_var, NLOS_angle_var])
 
     return angle_k_var
 
@@ -264,8 +268,9 @@ def calculate_alpha_qk(
 
     numerator = numerator_term.sum(dim=1)
     denominator = denominator_term.sum(dim=1)
-    
+
     alpha_qk = -1 * numerator / (denominator.clamp(min=1e-10))
+    alpha_qk = alpha_qk.clamp(min=1, max=6)
 
     return alpha_qk
 
@@ -331,11 +336,12 @@ def calculate_angle_qt_mean(
 
     angle_rad_qt = torch.atan2(y_diff, x_diff)
     angle_deg_qt = torch.rad2deg(angle_rad_qt)
-    angle_deg_qt = torch.fmod(torch.fmod(angle_deg_qt, 360.0) + 360.0, 360.0)
+
+    angle_deg_qt = torch.fmod(angle_deg_qt + 360.0, 360.0)
 
     ap_orientations_expanded = ap_orientations.unsqueeze(1).expand_as(angle_deg_qt) # shape: [Q, T]
-    relative_angle_deg = ap_orientations_expanded - angle_deg_qt
-
+    diff = ap_orientations_expanded - angle_deg_qt
+    relative_angle_deg = torch.remainder(diff + 180.0, 360.0) - 180.0
     angle_qt_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_qt_mean
@@ -481,15 +487,6 @@ def calculate_MEPLL_PropParams(
         + log_P_delay_qtk
     )
 
-    DEBUG = True
-    if DEBUG:
-        q = 0
-        t = 0
-        print("log_pi_k: ", log_pi_k)
-        print("log_P_power: ", log_P_power_qtk[q][t])
-        print("log_P_angle: ", log_P_angle_qtk[q][t])
-        print("log_P_delay: ", log_P_delay_qtk[q][t])
-
     log_marginal_likelihood_qt = torch.logsumexp(log_joint_prob_qtk, dim=2)
 
     MEPLL_PropParams = log_marginal_likelihood_qt.sum()
@@ -628,33 +625,6 @@ def calculate_emission_probability(
     log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
 
 ##### --- Emission Probability ---
-
-    DEBUG = False
-    if DEBUG:
-        print("**** point47 AP2 t=0 ****")
-        print("power_gqtk: ", power_gqtk[47, 1, 0]), 
-        print("power_gqtk_mean: ", power_gqtk_mean[47, 1, 0])
-        print("power_gqtk_var: ", power_gqtk_var[47, 1, 0])
-
-        print("**** point50 AP2 t=0 ****")
-        print("power_gqtk: ", power_gqtk[50, 1, 0]), 
-        print("power_gqtk_mean: ", power_gqtk_mean[50, 1, 0])
-        print("power_gqtk_var: ", power_gqtk_var[50, 1, 0])
-
-    DEBUG = False
-    if DEBUG:
-        print("########## point47 ##########")
-        print("log_pi_k_gqtk: ", log_pi_k_gqtk[47, :, 0])
-        print("log_P_power_gqtk: ", log_P_power_gqtk[47, :, 0])
-        print("log_P_angle_gqtk: ", log_P_angle_gqtk[47, :, 0])
-        print("log_P_delay_gqtk: ", log_P_delay_gqtk[47, :, 0])
-        print("\n")
-        print("########## point50 ##########")
-        print("log_pi_k_gqtk: ", log_pi_k_gqtk[50, :, 0])
-        print("log_P_power_gqtk: ", log_P_power_gqtk[50, :, 0])
-        print("log_P_angle_gqtk: ", log_P_angle_gqtk[50, :, 0])
-        print("log_P_delay_gqtk: ", log_P_delay_gqtk[50, :, 0])
-
     log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
     log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
     emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
@@ -670,18 +640,18 @@ def calculate_angle_gq_mean(
     ap_locations_expanded = ap_locations.unsqueeze(0)     # Shape [1, Q, 2]
     grid_expanded = reference_grid.unsqueeze(1)           # Shape [G, 1, 2]
 
-    vector_V_gq = ap_locations_expanded - grid_expanded
+    vector_V_gq = grid_expanded - ap_locations_expanded
     x_diff = vector_V_gq[..., 0]
     y_diff = vector_V_gq[..., 1]
 
     angle_rad_gq = torch.atan2(y_diff, x_diff)
     angle_deg_gq = torch.rad2deg(angle_rad_gq)
 
-    angle_deg_gq = torch.fmod(torch.fmod(angle_deg_gq, 360.0) + 360.0, 360.0)
+    angle_deg_gq = torch.fmod(angle_deg_gq + 360.0, 360.0)
 
     ap_orientations_expanded = ap_orientations.unsqueeze(0).expand_as(angle_deg_gq) # shape: [Q, T]
-    relative_angle_deg = ap_orientations_expanded - angle_deg_gq
-
+    diff = ap_orientations_expanded - angle_deg_gq
+    relative_angle_deg = torch.remainder(diff + 180.0, 360.0) - 180.0
     angle_gq_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_gq_mean
@@ -718,8 +688,7 @@ def gaussian_log_pdf(
 ##### --- Ping-Pong Updating step --- #####
 ###########################################
 
-def get_winner_neighbor_info( # FIXME 仔細檢查這裡每一步（如果參數更新沒錯那就是這裡錯，我發現參數才更新一次預測出來的路徑就整個不對，應該有問題）
-    t: int, 
+def get_winner_neighbor_info( 
     reference_grid: torch.Tensor, 
     ref_index: int, 
     G_neighbor_index_matrix: torch.Tensor, 
@@ -776,13 +745,6 @@ def get_winner_neighbor_info( # FIXME 仔細檢查這裡每一步（如果參數
         row_indices_j,
         G_winner_neighbor_relative_position
     ]
-
-    DEBUG = False
-    if DEBUG:
-        if t == 1:
-            print("score_g_9: ", score_g_9)
-            #print("G_winner_neighbor_relative_position: ", G_winner_neighbor_relative_position)
-            #print("max_value: ", max_value)
     
     return G_winner_neighbor_index, max_value
 
