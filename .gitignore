@@ -39,3 +39,4 @@ env/
 # Dataset
 dataset*
 *.ckpt
+print_stuff/*

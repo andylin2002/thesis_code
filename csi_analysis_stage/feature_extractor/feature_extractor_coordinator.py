@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from .mmp_core import MMP_Algorithm
 from . import power_extractor
 from . import delay_estimator
+import utils
 
 import torch
 
@@ -26,17 +27,18 @@ def run_feature_extractor(
     )
 
 ##### --- MMP algorithm (AoA & ToF) ---
-    mmp_engine = MMP_Algorithm(config=config)
+    if config['USE_BASELINE']:
+        angle_tensor_flat = utils.baseline_angle_estimator_music(batch_input_csi)
+    else:   # MYMETHOD
+        mmp_engine = MMP_Algorithm(config=config)
 
-    angle_tensor_flat, tof_tensor, eigv_x, eigv_y = mmp_engine.estimate_aoa_tof_batch(
-        input_csi=batch_input_csi
-    )
+        angle_tensor_flat, tof_tensor, eigv_x, eigv_y = mmp_engine.estimate_aoa_tof_batch(
+            input_csi=batch_input_csi
+        )
 
 ##### --- Delay ---
     if config['USE_BASELINE']:
-        magnitude_csi = batch_input_csi.abs()
-        variance_tensor = torch.var(magnitude_csi.reshape(num_batch, -1), dim=1)
-        delay_tensor_flat = 10 * torch.log10(variance_tensor + 1e-9)
+        delay_tensor_flat = utils.baseline_delay_estimator(num_batch, batch_input_csi)
     else:   # MYMETHOD
         delay_tensor_flat = (
             delay_estimator.estimate_delay_batch(

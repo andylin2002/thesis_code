@@ -3,7 +3,7 @@ import torch
 import argparse
 from typing import List, Dict, Any
 import time
-from multiprocessing import Queue, Process, set_start_method, Event
+from multiprocessing import Queue, JoinableQueue, Process, set_start_method, Event
 from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F, numpy as np, scipy.io, os
 
@@ -40,11 +40,25 @@ def main():
 
     args=parser.parse_args()
 
-##### --- Loading Environment & System Configuration ---
+##### --- Loading System Configuration & Environment ---
     config = utils.load_yaml_config(CONFIG_PATH)
     if not (config):
         print("Configuration loading failed.")
         return
+    
+    LOOP = config.get('LOOP')
+    
+    DATASET_FOLDER = config['DATASET_FOLDER']
+    ENV_CONFIG = config['ENV_CONFIG']
+
+    ENV_CONFIG_PATH = os.path.join(DATASET_FOLDER, ENV_CONFIG)
+
+    env_config = utils.load_yaml_config(ENV_CONFIG_PATH)
+    if not (env_config):
+        print("Environment Configuration loading failed.")
+        return
+    
+    config.update(env_config)
     
 ##### --- Reference Point Setup ---
     reference_grid, x_bounds, y_bounds, x_width, y_width = utils.generate_reference_grid(config)
@@ -77,25 +91,10 @@ def main():
     device = DEVICE
 
 ##### --- Create 3 Queue and KeyboardInterrupt Stop Event ---
-    csi_data_queue = Queue() # CSI Blocks Producter -> CSI2TRAJECTORY Worker
+    csi_data_queue = JoinableQueue() # CSI Blocks Producter -> CSI2TRAJECTORY Worker
     trajectory_queue = Queue()  # CSI2TRAJECTORY Worker -> TRANSFORMER Worker
     model_queue = Queue() # TRANSFORMER Worker -> CSI2TRAJECTORY Worker
     stop_event = Event()
-
-##### --- Load and Process CSI dataset ---
-    csi_blocks_list = utils.load_and_preprocess_csi_dataset(
-        dataset_folder=config['DATASET_FOLDER'],
-        config=config,
-        device=device
-    )
-
-    if csi_blocks_list:
-        for csi_block in csi_blocks_list:
-            csi_data_queue.put(csi_block)
-        print(f"\n[Pipeline] Queued {len(csi_blocks_list)} CSI blocks for processing.")
-    else:
-        print("[Pipeline] No CSI blocks generated. Exiting.")
-        return
 
 ##### --- Processes for the Two-stage Pipeline
     csi2trajectory_worker_process = Process(
@@ -111,25 +110,52 @@ def main():
     csi2trajectory_worker_process.start()
     transformer_worker_process.start()
 
-##### --- # Wait for Workers to Complete, ensuring graceful termination and cleanup on interrupt
+##### --- Load and Process CSI dataset ---
+    Hmatrix_list = config.get('HMATRIX_LIST')
+    if not Hmatrix_list:
+        print("[Error] 'HMATRIX_LIST' is missing or empty in config.")
+        return
+    
     try:
-        csi2trajectory_worker_process.join()
-        transformer_worker_process.join()
-        print("Pipeline finished normally.")
+        # LOOP
+        while True:
+            # Multiple Hmatrix
+            for Hmatrix_file in Hmatrix_list:
+                Hmatrix_path = os.path.join(DATASET_FOLDER, Hmatrix_file)
+
+                csi_blocks_list = utils.load_and_preprocess_csi_dataset(
+                    Hmatrix=Hmatrix_path,
+                    config=config,
+                    device=device
+                )
+
+                if csi_blocks_list:
+                    for csi_block in csi_blocks_list:
+                        csi_data_queue.put(csi_block)
+                    print(f"\n[Pipeline] Queued {len(csi_blocks_list)} CSI blocks for processing.")
+                    csi_data_queue.join()
+                else:
+                    print("[Pipeline] No CSI blocks generated. Exiting.")
+                    return
+
+            if not LOOP:
+                break
+
+##### --- Wait for Workers to Complete, ensuring graceful termination and cleanup on interrupt
     except KeyboardInterrupt:
-        print("\n[Main] Terminating pipeline...")
-        # Let Transformer Worker Save Current Model to Checkpoint
+        pass
+    finally:
         stop_event.set()
         transformer_worker_process.join(timeout=10)
 
-        if transformer_worker_process.is_alive():
-            transformer_worker_process.terminate()
-    finally:
         if csi2trajectory_worker_process.is_alive():
             csi2trajectory_worker_process.terminate()
-            csi2trajectory_worker_process.join()
-        print("[Main] Cleanup complete.")
+        if transformer_worker_process.is_alive():
+            transformer_worker_process.terminate()
 
+        csi2trajectory_worker_process.join()
+        transformer_worker_process.join()
+        print("[Main] Cleanup complete.")
 
 ##############################################
 ########## --- CSI to Trajectory --- #########
@@ -175,6 +201,7 @@ def CSI2TRAJECTORY_worker(
         if new_model_config['type'] == 'TRANSFORMER':
             current_transformer_model = create_transformer_instance(config, N_DIRECTIONS, device)
             current_transformer_model.load_state_dict(new_model_config['weights'])
+            current_transformer_model.to(device)
             current_transformer_model.eval()
             current_model_config = new_model_config
             print(f"[CSI2TRAJ] Received initial model V{current_model_config.get('version', 'N/A')}. Starting trajectory generation in TRANSFORMER mode.")
@@ -203,6 +230,7 @@ def CSI2TRAJECTORY_worker(
                         current_transformer_model = create_transformer_instance(config, N_DIRECTIONS, device)
 
                     current_transformer_model.load_state_dict(new_model_config['weights'])
+                    current_transformer_model.to(device)
                     current_transformer_model.eval()
                     current_model_config = new_model_config
             else:
@@ -240,13 +268,16 @@ def CSI2TRAJECTORY_worker(
             traj_numpy = trajectory.detach().cpu().numpy()
             full_trajectory_history.append(traj_numpy) 
             accumulated_path = np.concatenate(full_trajectory_history, axis=0)
-            np.save('predicted_trajectory.npy', accumulated_path)
+            np.save('print_stuff/predicted_trajectory.npy', accumulated_path)
 
             round_counter += 1
             time.sleep(SLEEP)
 
             if DEVICE.type == 'cuda':
                 torch.cuda.empty_cache()
+
+            # Tell the Main Process that the data has been processed!
+            csi_data_queue.task_done()
 
     except KeyboardInterrupt:
         return
@@ -265,7 +296,7 @@ def TRANSFORMER_worker(
     stop_event: Event,  # pyright: ignore[reportInvalidTypeForm]
     device: torch.device
 ):
-    """
+
 ##### --- Parameters Setup ---
     TRAINING_EPOCHS = config['TRAINING_EPOCHS']
     BATCH_SIZE = config['BATCH_SIZE']
@@ -318,7 +349,7 @@ def TRANSFORMER_worker(
             initial_model_config = {
                 'version': current_version,
                 'type': 'TRANSFORMER',
-                'weights': model.state_dict(),
+                'weights': {k: v.cpu() for k, v in model.state_dict().items()},
             }
             model_queue.put(initial_model_config)
     else:
@@ -395,7 +426,7 @@ def TRANSFORMER_worker(
                 new_model_config = {
                     'version': current_version,
                     'type': 'TRANSFORMER',
-                    'weights': model.state_dict(),
+                    'weights': {k: v.cpu() for k, v in model.state_dict().items()},
                 }
                 
                 model_queue.put(new_model_config)
@@ -426,9 +457,6 @@ def TRANSFORMER_worker(
         print(f"[TRANSFORMER] Successfully saved final state V{current_version}.")
     except Exception as e:
         print(f"[TRANSFORMER ERROR] Failed to save checkpoint at {checkpoint_path}. Error: {e}")
-
-    """
-
 
 if __name__ == '__main__':
     main()

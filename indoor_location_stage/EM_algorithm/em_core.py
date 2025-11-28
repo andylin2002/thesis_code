@@ -201,7 +201,7 @@ class EM_Algorithm:
         if DEBUG:
             try:
                 init_traj_numpy = self.trajectory.detach().cpu().numpy()
-                np.save('init_traj.npy', init_traj_numpy)
+                np.save('print_stuff/init_traj.npy', init_traj_numpy)
                 # print("[Init] Initial trajectory saved to 'init_traj.npy'")
             except Exception as e:
                 print(f"[Init Error] Failed to save init_traj.npy: {e}")
@@ -354,7 +354,7 @@ class EM_Algorithm:
                 )
             )
 
-            DEBUG = True
+            DEBUG = False
             if DEBUG:
                 print("===== Iteration =====\n")
                 print(f"  MEPLL_New: {MEPLL_PropParams_new:.4f} vs Old_Max: {MAX_MEPLL_PropParams:.4f}")

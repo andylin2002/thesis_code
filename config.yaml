@@ -1,42 +1,18 @@
+### --- LOOP --- ###
+LOOP: False
+
 ### --- Baseline --- ###
 USE_BASELINE: False
 
-### --- 1. Environment Setup --- ###
-SCENARIO_NAME: "MCSLab"
-DATASET_FOLDER: "dataseteasy_1"
-DIMENSION: 2  # 2D (x, y)
-
-# --- Access Point  ---
-ACCESS_POINTS:
-  # AP_ID 1
-  AP_1:
-    NAME: "AP_window"
-    LOCATION_M: [0, 10] #[-10, -0.5]
-    ORIENTATION_DEG: 0
-
-  # AP_ID 2
-  AP_2:
-    NAME: "AP_North"
-    LOCATION_M: [30, 10]   #[8, -5]
-    ORIENTATION_DEG: 180
-
-  # AP_ID 3
-  AP_3:
-    NAME: "AP_East"
-    LOCATION_M: [15, 20] #[-1.5, 7]
-    ORIENTATION_DEG: 270
-
-  # AP_ID 4
-  AP_4:
-    NAME: "AP_Northwest"
-    LOCATION_M: [15, 0]  #[-3.5, -8]
-    ORIENTATION_DEG: 90
+### --- Environment & Trajectory --- ###
+DATASET_FOLDER: "dataset_easyspace"
+ENV_CONFIG: "env_config.yaml"
+HMATRIX_LIST: 
+  - "Hmatrix_1"
 
 # --- Grid Generation Parameters ---
 GRID_RESOLUTION_M: 0.5
 BUFFER_DISTANCE_M: 0
-
-
 
 ### --- 2. System Setup --- ###
 CSI_DIMENSIONS:
@@ -49,11 +25,11 @@ CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 56                           # notation: T
+NUM_SAMPLE: 14                           # notation: T
 NUM_PACKET: 1                          # notation: P
 
 ### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 100 # DEBUG 故意先設很大（先不用transformer）
+MIN_TRAJ_TO_TRAIN: 10 # DEBUG 故意先設很大（先不用transformer）
 BATCH_SIZE: 10
 TRAINING_EPOCHS: 50
 

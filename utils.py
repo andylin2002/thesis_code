@@ -26,7 +26,9 @@ def round_to_half(value: float) -> float:
     """Rounds a floating-point number to the nearest multiple of 0.5."""
     return round(value * 2) / 2
 
-def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[float], List[float]]:
+def generate_reference_grid(
+        config: Dict[str, Any], 
+    ) -> Tuple[torch.Tensor, List[float], List[float]]:
     """
     Calculates the boundary of the localization area and generates
     a uniform grid of prediction points based on AP locations.
@@ -98,7 +100,7 @@ def generate_reference_grid(config: Dict[str, Any]) -> Tuple[torch.Tensor, List[
     return grid_points_tensor, x_limits, y_limits, W, H
 
 def load_and_preprocess_csi_dataset(
-    dataset_folder: str, 
+    Hmatrix: str, 
     config: Dict[str, Any], 
     device: torch.device
 ) -> List[torch.Tensor]:
@@ -115,7 +117,7 @@ def load_and_preprocess_csi_dataset(
     ap_ids_in_dataset = set()
     
     # 步驟 1: 解析檔名並讀取數據
-    for filename in os.listdir(dataset_folder):
+    for filename in os.listdir(Hmatrix):
         match = filename_pattern.match(filename)
         if match:
             time_stamp = int(match.group(1))
@@ -123,7 +125,7 @@ def load_and_preprocess_csi_dataset(
             inst_id = int(match.group(3)) # Subcarrier ID
             ap_ids_in_dataset.add(rx_id)
             
-            file_path = os.path.join(dataset_folder, filename)
+            file_path = os.path.join(Hmatrix, filename)
             
             # 讀取單個子載波的 N 根天線數據 (N_rx,)
             H_complex_N = _read_antenna_data_csv(file_path, N)
@@ -286,39 +288,88 @@ def get_history_coords_batch(
     
     return history_coords
 
+#=============== Baseline Function ===============#
 
-
-
-#===============TEST===============#
-
-def save_csi_blocks_for_verification(
-    csi_blocks_list: List[torch.Tensor], 
-    output_path: str = "verified_csi_raw_data.npy"
-):
+def baseline_angle_estimator_music(batch_input_csi: torch.Tensor) -> torch.Tensor:
     """
-    將 CSI blocks 列表轉換為單個 NumPy 陣列並儲存，用於數據驗證。
-
+    使用三根天線實現 MUSIC 演算法，針對 Dominant Path (主要路徑) 進行估計。
+    此實作參考論文策略，利用子載波平均來穩定協方差矩陣，並提取最大特徵值對應的角度。
+    
     Args:
-        csi_blocks_list: 包含 (Q, TP, N, M) 張量的列表。
-        output_path: 儲存檔案的路徑和名稱。
+        batch_input_csi: Tensor shape (batch_size, N, M)
+                         N=3 (天線數), M (子載波數)
+    Returns:
+        angle_tensor_flat: Tensor shape (batch_size,)
+                           估計出的角度 (度)
     """
-    if not csi_blocks_list:
-        print("CSI blocks list is empty. Nothing to save.")
-        return
+    batch_size, N, M = batch_input_csi.shape
+    device = batch_input_csi.device
+    
+    # 1. 計算協方差矩陣 (Sample Covariance Matrix)
+    # 利用 M 個子載波取平均，穩定 3x3 的矩陣 R
+    # batch_input_csi: (B, N, M)
+    # csi_H: (B, M, N) (共軛轉置)
+    csi_H = batch_input_csi.conj().transpose(1, 2)
+    R = torch.bmm(batch_input_csi, csi_H) / M  # Shape: (B, N, N)
 
-    # 將所有 (Q, TP, N, M) 張量沿著第一個維度 (Block 數量) 堆疊
-    try:
-        # 將 PyTorch 張量移回 CPU 並轉換為 NumPy 陣列
-        numpy_blocks = [block.cpu().numpy() for block in csi_blocks_list]
-        
-        # 沿著新的 "Block ID" 維度堆疊
-        stacked_data = np.stack(numpy_blocks, axis=0) 
-        
-        # 儲存為 NumPy 檔案
-        np.save(output_path, stacked_data)
-        
-        print(f"✅ Successfully saved stacked CSI data to {output_path}")
-        print(f"   Shape of saved data: {stacked_data.shape}")
-        
-    except Exception as e:
-        print(f"❌ Error saving CSI data: {e}")
+    # 2. 特徵值分解 (Eigen-decomposition)
+    # torch.linalg.eigh 返回的特徵值是由小到大排列 (ascending)
+    # 因此最後一個是最大的特徵值 (對應主要路徑)
+    eigvals, eigvecs = torch.linalg.eigh(R)
+    
+    # 3. 選取雜訊子空間 (Noise Subspace)
+    # 對於只有 3 根天線的情況，我們假設只有 1 個主要訊號源 (Dominant Path)
+    # 因此保留前 N-1 (即 2 個) 特徵向量作為雜訊子空間
+    # U_noise Shape: (B, N, N-1)
+    U_noise = eigvecs[:, :, :-1]
+
+    # 4. 建立搜尋網格 (Steering Vectors)
+    # 搜尋範圍 -90 到 90 度
+    num_search_points = 180
+    search_angles_deg = torch.linspace(-90, 90, num_search_points, device=device)
+    search_angles_rad = torch.deg2rad(search_angles_deg)
+
+    # 建立導向向量 a(theta)
+    # 假設天線間距 d = 0.5 * lambda (標準 ULA)
+    d_lambda = 0.5
+    k = torch.arange(N, device=device).reshape(-1, 1) # (N, 1)
+    sin_phi = torch.sin(search_angles_rad).reshape(1, -1) # (1, 180)
+    
+    # exponent: -j * 2 * pi * d_lambda * k * sin(phi)
+    exponent = -1j * 2 * torch.pi * d_lambda * k * sin_phi # (N, 180)
+    a_vectors = torch.exp(exponent).unsqueeze(0) # (1, N, 180) 增加 batch 維度以廣播
+
+    # 5. 計算 MUSIC 譜並搜尋極值
+    # 目標: 找與雜訊子空間正交性最好 (投影分量最小) 的向量
+    # P_mu(theta) = 1 / (a^H * U_n * U_n^H * a)
+    # 這裡我們計算分母 (Spectrum Energy)，然後找最小值 (argmin)
+    
+    # U_noise_H: (B, N-1, N)
+    U_noise_H = U_noise.conj().transpose(1, 2)
+    
+    # projection = U_n^H * a
+    # (B, N-1, N) x (1, N, 180) -> (B, N-1, 180)
+    projection = torch.matmul(U_noise_H, a_vectors)
+    
+    # 計算能量: sum(|projection|^2)
+    spectrum_energy = torch.sum(torch.abs(projection)**2, dim=1) # (B, 180)
+
+    # 6. 找出能量最小的索引 (即 MUSIC 譜峰值)
+    min_indices = torch.argmin(spectrum_energy, dim=1) # (B,)
+    
+    # 對應回角度
+    angle_tensor_flat = search_angles_deg[min_indices]
+
+    return angle_tensor_flat
+
+def baseline_delay_estimator(
+        num_batch: torch.Tensor, 
+        batch_input_csi: torch.Tensor, 
+    ):
+
+    magnitude_csi = batch_input_csi.abs()
+    variance_tensor = torch.var(magnitude_csi.reshape(num_batch, -1), dim=1)
+    delay_tensor_flat = 10 * torch.log10(variance_tensor + 1e-9)
+
+    return delay_tensor_flat
+
