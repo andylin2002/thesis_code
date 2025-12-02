@@ -685,15 +685,13 @@ def gaussian_log_pdf(
 
 
 ###########################################
-##### --- Ping-Pong Updating step --- #####
+###### --- Viterbi Updating step --- ######
 ###########################################
 
 def get_winner_neighbor_info( 
-    reference_grid: torch.Tensor, 
-    ref_index: int, 
     G_neighbor_index_matrix: torch.Tensor, 
     delta: torch.Tensor, 
-    path: torch.Tensor, 
+    history_coords: Optional[torch.Tensor], 
     model: Optional[torch.nn.Module], 
     mode: str, 
     SOS_TOKEN: int
@@ -702,11 +700,9 @@ def get_winner_neighbor_info(
     G = delta.shape[0]
 
 ##### --- Transition Log Probability Using Transformer ---
-    if model is not None:
+    # Transformer predictions are computed only if needed
+    if model is not None and mode == 'TRANSFORMER':
         with torch.no_grad():
-
-            history_coords = utils.get_history_coords_batch(reference_grid, ref_index, path)
-
             transition_log_prob_G_9 = transformer_batch_predict_logits(
                 model, 
                 history_coords, 
@@ -714,20 +710,21 @@ def get_winner_neighbor_info(
                 device=delta.device
             )
 
-##### --- Find Maximum Value and Index for each Point---
+##### --- Find Maximum Value and Index for each Point ---
     valid_mask = G_neighbor_index_matrix != -1
-    delta_prev = delta[:, ref_index]
+    
+    # Delta passed in is already the previous step's accumulated probability (G,)
+    delta_prev = delta 
 
-    invalid_score = -torch.inf
+    invalid_score = -float('inf')
     score_g_9 = torch.full((G, 9), invalid_score, dtype=torch.float32, device=delta.device)
 
-    # 9 Directions
+    # Iterate over 9 neighbor directions
     for neighbor_pos in range(9):
         opposite_neighbor_pos = utils.opposite(neighbor_pos)
         neighbor_indices = G_neighbor_index_matrix[:, neighbor_pos]
         mask = valid_mask[:, neighbor_pos]
 
-        # If there is any available neighbor
         if mask.any():
             gathered_deltas = delta_prev[neighbor_indices[mask]]
 
@@ -738,33 +735,15 @@ def get_winner_neighbor_info(
                 gather_transition = transition_log_prob_G_9[neighbor_indices[mask], opposite_neighbor_pos]
                 score_g_9[mask, neighbor_pos] = gathered_deltas + gather_transition
 
-    # Find Max and Argmax of score for each Reference Point
+    # Find Max (Value) and Argmax (Source Neighbor) for each Reference Point
     max_value, G_winner_neighbor_relative_position = torch.max(score_g_9, dim=1)
+    
     row_indices_j = torch.arange(G, device=G_neighbor_index_matrix.device)
+    
+    # Map relative position (0-8) back to actual grid index
     G_winner_neighbor_index = G_neighbor_index_matrix[
         row_indices_j,
         G_winner_neighbor_relative_position
     ]
     
     return G_winner_neighbor_index, max_value
-
-def update_delta_and_path(
-    t: int, 
-    ref_index: int, 
-    tgt_index: int, 
-    delta: torch.Tensor, 
-    path: torch.Tensor, 
-    G_winner_neighbor_index: torch.Tensor, 
-    max_value: torch.Tensor,
-    current_emission_log_prob: torch.Tensor
-):
-
-    T = path.shape[1]
-
-##### --- Update delta ---
-    delta[:, tgt_index] = current_emission_log_prob + max_value
-
-##### --- Update path
-    path[:, T-1-t : T-1 : 1, tgt_index] = path[G_winner_neighbor_index, T-t : T : 1, ref_index]
-
-    return delta, path

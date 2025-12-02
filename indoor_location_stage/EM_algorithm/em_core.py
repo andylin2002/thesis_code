@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from . import em_calculator as emc
+from .path_manager import ViterbiPathManager
 from markov_model.uniform_markov import generate_uniform_markov_trajectory
 from transformer.transformer_tool import generate_transformer_trajectory
 
@@ -394,7 +395,7 @@ class EM_Algorithm:
         G = self.reference_grid.shape[0]
 
     ##### --- Fisrt: Construct G * T Emission Probability step ---
-
+        # Calculate emission probabilities for all grid points over time
         emission_probability_gt = (
             emc.calculate_emission_probability(
                 feature_matrix,
@@ -406,63 +407,50 @@ class EM_Algorithm:
             )
         )
 
-    ##### --- Second: PingPong Updating step ---
+    ##### --- Second: Viterbi Backpointer Updating step ---
         # Construct Neighbor Table
         G_index = torch.arange(G).to(DEVICE)
         G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
-        # FIXME 準備改成 Viterbi backpointer
-        # Initialize delta and path=
-        delta = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
-        path = torch.full((G, T, 2), -1, dtype=torch.long, device=DEVICE)
+        # Initialize Path Manager
+        path_manager = ViterbiPathManager(G, T, reference_grid, DEVICE)
 
-        delta[:, 0] = emission_probability_gt[:, 0]
+        # Initialize delta (log probability) with t=0 emission probs
+        delta = torch.full((G,), -torch.inf, dtype=torch.float32, device=DEVICE)
+        delta = emission_probability_gt[:, 0]
 
-        G_index_stacked = torch.stack([G_index, G_index], dim=1)
-        path[:, -1, :] = G_index_stacked
-
-        # delta and path are Update over 't-1' Iteration
+        # Main Loop: Update delta and backpointers from t=1 to T-1
         for t in range(1, T):
-            # Ping-Pong Structure
-            ref_index = (t + 1) % 2
-            tgt_index = t % 2
-
             current_emission_log_prob = emission_probability_gt[:, t]
 
-            # Find the Max and Argmax of 'delta + logP' for each Reference Point
+            # Lazy Reconstruction: Retrieve history coords only if needed for Transformer
+            history_coords = None
+            if self.mode == 'TRANSFORMER':
+                history_coords = path_manager.get_history_coords(end_t=t-1)
+
+            # Find the best previous neighbor and max transition probability
             G_winner_neighbor_index, max_value = (
                 emc.get_winner_neighbor_info(
-                    reference_grid, 
-                    ref_index, 
                     G_neighbor_index_matrix, 
-                    delta, 
-                    path, 
+                    delta,
+                    history_coords,
                     self.model,    
                     self.mode, 
                     self.SOS_TOKEN
                 )
             )
 
-            # Update
-            delta, path = (
-                emc.update_delta_and_path(
-                    t, 
-                    ref_index, 
-                    tgt_index, 
-                    delta, 
-                    path, 
-                    G_winner_neighbor_index, 
-                    max_value, 
-                    current_emission_log_prob
-                )
-            )
+            # Update delta with current emission and best transition
+            delta = current_emission_log_prob + max_value
 
-            # Find the Trajectory by the Largest delta
-            if t == (T - 1):
-                MEPLL_Trajectory, chosen_index = torch.max(delta[:, tgt_index], dim=0)
-                trajectory_index_sequence = path[chosen_index, :, tgt_index]
-                self.trajectory = reference_grid[trajectory_index_sequence]
+            # Record the best parent indices for backtracking
+            path_manager.update(t, G_winner_neighbor_index)
 
+        # Find the end node with maximum probability
+        MEPLL_Trajectory, best_end_node = torch.max(delta, dim=0)
+
+        # Traceback the optimal path using backpointers
+        self.trajectory = path_manager.traceback_final_trajectory(T-1, best_end_node)
         self.MEPLL_Trajectory = MEPLL_Trajectory
         
     def _check_convergence(self):
