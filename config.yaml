@@ -8,7 +8,8 @@ USE_BASELINE: False
 DATASET_FOLDER: "dataset_easyspace"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST: 
-  - "Hmatrix_1"
+  - "Hmatrix_3"
+  - "Hmatrix_4"
 
 # --- Grid Generation Parameters ---
 GRID_RESOLUTION_M: 0.5
@@ -25,11 +26,11 @@ CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 14                           # notation: T
+NUM_SAMPLE: 10                           # notation: T
 NUM_PACKET: 1                          # notation: P
 
 ### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 10 # DEBUG 故意先設很大（先不用transformer）
+MIN_TRAJ_TO_TRAIN: 20
 BATCH_SIZE: 10
 TRAINING_EPOCHS: 50
 

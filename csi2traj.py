@@ -17,6 +17,9 @@ def run_csi2traj(
     if raw_csi_data is None:
         print("CSI data loading failed.")
         return
+
+##### --- Sanitize Input: Replace NaN/Inf with 0.0 ---
+    raw_csi_data = torch.nan_to_num(raw_csi_data, nan=0.0, posinf=0.0, neginf=0.0)
     
 ##### --- Starting CSI Analysis Stage ---
     from csi_analysis_stage import run_csi_analysis

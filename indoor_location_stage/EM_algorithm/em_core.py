@@ -55,7 +55,7 @@ class EM_Algorithm:
         self.propagation_params = self._initialize_PropParams()
         self.trajectory = self._initialize_Trajectory()
 
-        DEBUG = True
+        DEBUG = False
         if DEBUG:
             print("init self.trajectory: ", self.trajectory)
 
@@ -177,7 +177,7 @@ class EM_Algorithm:
             'gamma_qtk':            gamma_qtk,              # shape: (Q, T, K)
         }
 
-        DEBUG = True
+        DEBUG = False
         if DEBUG:
             print("=== Initial Params ===")
             print("alpha_qk: ", propagation_params['alpha_qk']) # DEBUG
@@ -411,7 +411,8 @@ class EM_Algorithm:
         G_index = torch.arange(G).to(DEVICE)
         G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
-        # Initialize delta and path
+        # FIXME 準備改成 Viterbi backpointer
+        # Initialize delta and path=
         delta = torch.full((G, 2), -torch.inf, dtype=torch.float32, device=DEVICE)
         path = torch.full((G, T, 2), -1, dtype=torch.long, device=DEVICE)
 
