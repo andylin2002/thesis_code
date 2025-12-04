@@ -27,19 +27,19 @@ def run_feature_extractor(
     )
 
 ##### --- MMP algorithm (AoA & ToF) ---
-    if config['USE_BASELINE']:
-        angle_tensor_flat = utils.baseline_angle_estimator_music(batch_input_csi)
-    else:   # MYMETHOD
-        mmp_engine = MMP_Algorithm(config=config)
+    mmp_engine = MMP_Algorithm(config=config)
 
-        angle_tensor_flat, tof_tensor, eigv_x, eigv_y = mmp_engine.estimate_aoa_tof_batch(
-            input_csi=batch_input_csi
-        )
+    angle_tensor_flat, tof_tensor, eigv_x, eigv_y = mmp_engine.estimate_aoa_tof_batch(
+        input_csi=batch_input_csi
+    )
 
 ##### --- Delay ---
-    if config['USE_BASELINE']:
+    print("config['SYSTEM_MODE']: ", config['SYSTEM_MODE'])
+    if config['SYSTEM_MODE'] == 'BASELINE':
+        print("DEBUG")
         delay_tensor_flat = utils.baseline_delay_estimator(num_batch, batch_input_csi)
-    else:   # MYMETHOD
+
+    if config['SYSTEM_MODE'] == 'PROPOSED':
         delay_tensor_flat = (
             delay_estimator.estimate_delay_batch(
                 batch_input_csi, 

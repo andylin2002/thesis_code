@@ -78,7 +78,7 @@ class EM_Algorithm:
         K = 2 # LOS and NLOS
         MIN_VAR = 1
         
-        if self.config['USE_BASELINE']:
+        if self.config['SYSTEM_MODE'] == 'BASELINE':
         ##### --- Random Parameters ---
             alpha_qk = torch.rand((self.num_ap, 2), dtype=torch.float32, device=DEVICE) * 5.0 + 1.0
             beta_qk = torch.rand((self.num_ap, 2), dtype=torch.float32, device=DEVICE) * 60.0 - 90.0
@@ -94,7 +94,7 @@ class EM_Algorithm:
             raw_gamma = torch.randn((self.num_ap, self.num_sample, 2), dtype=torch.float32, device=DEVICE)
             gamma_qtk = torch.nn.functional.softmax(raw_gamma, dim=-1)
 
-        else:   # MYMETHOD
+        if self.config['SYSTEM_MODE'] == 'PROPOSED':
         ##### Initialize all learned propagation parameters
             alpha_qk =      torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
             beta_qk =       torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)

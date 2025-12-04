@@ -1,14 +1,15 @@
 ### --- LOOP --- ###
 LOOP: False
 
-### --- Baseline --- ###
-USE_BASELINE: False
+### --- System Mode --- ###
+#SYSTEM_MODE: 'BASELINE'
+SYSTEM_MODE: 'PROPOSED'
 
 ### --- Environment & Trajectory --- ###
 DATASET_FOLDER: "dataset_easyspace"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST: 
-  - "Hmatrix_4"
+  - "Hmatrix_1"
 
 # --- Grid Generation Parameters ---
 GRID_RESOLUTION_M: 0.5
@@ -25,11 +26,11 @@ CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 10                           # notation: T
+NUM_SAMPLE: 56                           # notation: T
 NUM_PACKET: 1                          # notation: P
 
 ### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 20
+MIN_TRAJ_TO_TRAIN: 20000
 BATCH_SIZE: 10
 TRAINING_EPOCHS: 50
 

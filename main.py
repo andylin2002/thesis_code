@@ -36,7 +36,6 @@ def main():
     parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
     parser.add_argument('--em_max_iter', type=int, default=100)
     parser.add_argument('--round', type=int, default=5000)
-    parser.add_argument('--use_baseline', type=bool)
 
     args=parser.parse_args()
 
@@ -66,8 +65,6 @@ def main():
 ##### --- Put Hyperparameter into Config ---
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
-    if args.use_baseline:
-        config['USE_BASELINE'] = args.use_baseline
     
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
