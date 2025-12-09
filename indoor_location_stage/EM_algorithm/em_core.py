@@ -19,7 +19,6 @@ class EM_Algorithm:
             feature_matrix: torch.Tensor, 
             config: Dict[str, Any], 
             reference_grid: torch.Tensor,
-            context: Dict[str, Any], 
             model: Optional[torch.nn.Module], 
             mode: str, 
             directions_vectors: np.ndarray
@@ -27,8 +26,7 @@ class EM_Algorithm:
 
         self.feature_matrix = feature_matrix
         self.config = config
-        self.reference_grid = reference_grid 
-        self.context = context
+        self.reference_grid = reference_grid
         self.model = model
         self.mode = mode
         self.directions_vectors = directions_vectors
@@ -77,7 +75,7 @@ class EM_Algorithm:
         T = self.num_sample
         K = 2 # LOS and NLOS
         MIN_VAR = 1
-        
+        """
         if self.config['SYSTEM_MODE'] == 'BASELINE':
         ##### --- Random Parameters ---
             alpha_qk = torch.rand((self.num_ap, 2), dtype=torch.float32, device=DEVICE) * 5.0 + 1.0
@@ -93,78 +91,79 @@ class EM_Algorithm:
             pi_k = torch.nn.functional.softmax(torch.randn((2,), dtype=torch.float32, device=DEVICE), dim=0)
             raw_gamma = torch.randn((self.num_ap, self.num_sample, 2), dtype=torch.float32, device=DEVICE)
             gamma_qtk = torch.nn.functional.softmax(raw_gamma, dim=-1)
+        
+        if self.config['SYSTEM_MODE'] == 'BASELINE':
+        """
+    ##### Initialize all learned propagation parameters
+        alpha_qk =      torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
+        beta_qk =       torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
+        power_qk_var =  torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
+        angle_k_var =   torch.zeros(K, dtype=torch.float32, device=DEVICE)
+        delay_k_mean =  torch.zeros(K, dtype=torch.float32, device=DEVICE)
+        delay_k_var =   torch.zeros(K, dtype=torch.float32, device=DEVICE)
+        pi_k =          torch.full((K, ), 0.5, dtype=torch.float32, device=DEVICE)
+        gamma_qtk =     torch.full((Q, T, K), 0.5, dtype=torch.float32, device=DEVICE)
 
-        if self.config['SYSTEM_MODE'] == 'PROPOSED':
-        ##### Initialize all learned propagation parameters
-            alpha_qk =      torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
-            beta_qk =       torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
-            power_qk_var =  torch.zeros(Q, K, dtype=torch.float32, device=DEVICE)
-            angle_k_var =   torch.zeros(K, dtype=torch.float32, device=DEVICE)
-            delay_k_mean =  torch.zeros(K, dtype=torch.float32, device=DEVICE)
-            delay_k_var =   torch.zeros(K, dtype=torch.float32, device=DEVICE)
-            pi_k =          torch.full((K, ), 0.5, dtype=torch.float32, device=DEVICE)
-            gamma_qtk =     torch.full((Q, T, K), 0.5, dtype=torch.float32, device=DEVICE)
+    ##### --- Extract features from the input matrix ---
+        power_qt = self.feature_matrix[:, :, 0]
+        angle_qt = self.feature_matrix[:, :, 1]
+        delay_qt = self.feature_matrix[:, :, 2]
 
-        ##### --- Extract features from the input matrix ---
-            power_qt = self.feature_matrix[:, :, 0]
-            angle_qt = self.feature_matrix[:, :, 1]
-            delay_qt = self.feature_matrix[:, :, 2]
-
-        ##### --- Initialize "POWER" parameters ---
-            alpha_qk, beta_qk = (
-                emc.calculate_init_alpha_and_beta_qk(
-                    self.reference_grid, 
-                    self.ap_locations, 
-                    power_qt
-                )
+    ##### --- Initialize "POWER" parameters ---
+        alpha_qk, beta_qk = (
+            emc.calculate_init_alpha_and_beta_qk(
+                self.reference_grid, 
+                self.ap_locations, 
+                power_qt
             )
-            power_qk_var = (
-                emc.calculate_init_power_qk_var(
-                    self.reference_grid, 
-                    self.ap_locations, 
-                    alpha_qk, 
-                    beta_qk, 
-                    power_qt
-                )
+        )
+        power_qk_var = (
+            emc.calculate_init_power_qk_var(
+                self.reference_grid, 
+                self.ap_locations, 
+                alpha_qk, 
+                beta_qk, 
+                power_qt
             )
+        )
 
-        ##### --- Initialize "ANGLE" parameters ---
-            angle_k_var = (
-                emc.calculate_init_angle_k_var(
-                    self.reference_grid, 
-                    self.ap_locations, 
-                    self.ap_orientations,
-                    angle_qt
-                )
+    ##### --- Initialize "ANGLE" parameters ---
+        angle_k_var = (
+            emc.calculate_init_angle_k_var(
+                self.reference_grid, 
+                self.ap_locations, 
+                self.ap_orientations,
+                angle_qt
             )
+        )
 
-        ##### --- Initialize "DELAY" parameters ---
-            # Cluster Delay data globally and assign means and variances
-            delay_flat = delay_qt.flatten()
-            delay_means, delay_vars = emc.estimate_two_gaussians(delay_flat)
-            delay_k_mean.copy_(delay_means.to(DEVICE))
-            delay_k_var.copy_(delay_vars.clamp(min=MIN_VAR))
+    ##### --- Initialize "DELAY" parameters ---
+        # Cluster Delay data globally and assign means and variances
+        delay_flat = delay_qt.flatten()
+        delay_means, delay_vars = emc.estimate_two_gaussians(delay_flat)
+        delay_k_mean.copy_(delay_means.to(DEVICE))
+        delay_k_var.copy_(delay_vars.clamp(min=MIN_VAR))
 
-        ##### --- Initialize "gamma_qtk" ---
-            delay_11k_mean = delay_k_mean.view(1, 1, -1)
-            delay_11k_var = delay_k_var.view(1, 1, -1)
+    ##### --- Initialize "gamma_qtk" ---
+        delay_11k_mean = delay_k_mean.view(1, 1, -1)
+        delay_11k_var = delay_k_var.view(1, 1, -1)
 
-            mean_distance = torch.abs(delay_k_mean[0] - delay_k_mean[1])
+        mean_distance = torch.abs(delay_k_mean[0] - delay_k_mean[1])
 
-            delay_11k_var = delay_11k_var * 1 * mean_distance.clamp(min=1.0)
-            delay_distribution_qtk = (
-                emc.build_gaussian_distribution(
-                    delay_11k_mean, 
-                    delay_11k_var
-                )
+        delay_11k_var = delay_11k_var * 1 * mean_distance.clamp(min=1.0)
+        delay_distribution_qtk = (
+            emc.build_gaussian_distribution(
+                delay_11k_mean, 
+                delay_11k_var
             )
-            
-            gamma_qtk = (
-                emc.calculate_init_gamma_qtk(
-                    delay_distribution_qtk, 
-                    delay_qt
-                )
+        )
+        
+        gamma_qtk = (
+            emc.calculate_init_gamma_qtk(
+                delay_distribution_qtk, 
+                delay_qt
             )
+        )
         
     ##### --- Structure and return the propagation parameters dictionary ---
         propagation_params = {
@@ -202,7 +201,7 @@ class EM_Algorithm:
         if DEBUG:
             try:
                 init_traj_numpy = self.trajectory.detach().cpu().numpy()
-                np.save('print_stuff/init_traj.npy', init_traj_numpy)
+                np.save('output/init_traj.npy', init_traj_numpy)
                 # print("[Init] Initial trajectory saved to 'init_traj.npy'")
             except Exception as e:
                 print(f"[Init Error] Failed to save init_traj.npy: {e}")

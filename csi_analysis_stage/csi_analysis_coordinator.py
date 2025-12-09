@@ -31,7 +31,7 @@ def run_csi_analysis(
         try:
             feature_matrix_np = feature_matrix.detach().cpu().numpy()
             
-            save_path = "print_stuff/csi_feature_matrix.npy"
+            save_path = "output/csi_feature_matrix.npy"
             
             np.save(save_path, feature_matrix_np)
             print(f"[System] Feature matrix saved to: {os.path.abspath(save_path)}")

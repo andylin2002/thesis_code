@@ -1,459 +1,203 @@
-import utils
+import os
+import time
 import torch
 import argparse
-from typing import List, Dict, Any
-import time
-from multiprocessing import Queue, JoinableQueue, Process, set_start_method, Event
-from torch.utils.data import DataLoader, TensorDataset
-import torch.nn.functional as F, numpy as np, scipy.io, os
+import scipy.io
+import numpy as np
+from multiprocessing import JoinableQueue, Queue, Event, set_start_method
+from queue import Empty
 
-from csi2traj import run_csi2traj
-from transformer.transformer_tool import convert_long_trajectory_to_ids, create_transformer_instance
-from transformer.architecture.noam_opt import NoamOpt
-from transformer.architecture.batch import subsequent_mask
+# Import Utility
+import utils
 
-CHECKPOINT_DIR = 'checkpoint'
+# Import New Workers
+from workers.csi_worker import CSI_Worker
+from workers.tfm_worker import TFM_Worker
+
+# Configuration Paths
 CONFIG_PATH = 'config.yaml'
+CHECKPOINT_DIR = 'checkpoint'
+DATASET_ROOT = 'dataset'
+# Set Device
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-N_DIRECTIONS = 9
-
-
-##############################################
-############# --- Controller --- #############
-##############################################
 
 def main():
-##### --- Set multiprocessing start method to 'spawn' to ensure safe CUDA usage in subprocesses.
+    # 1. Setup Multiprocessing (Spawn method required for CUDA)
     try:
         if torch.cuda.is_available():
             set_start_method('spawn', force=True)
-            print("Multiprocessing start method set to 'spawn' for CUDA compatibility.")
+            print("[System] Multiprocessing start method set to 'spawn'.")
     except RuntimeError as e:
         if 'start method has been set' not in str(e):
              raise e
 
-##### --- Initialize the argument parser
-    parser=argparse.ArgumentParser(description='CSI Indoor Position System Parameter')
+    # 2. Parse Arguments
+    parser = argparse.ArgumentParser(description='CSI Indoor Localization System')
     parser.add_argument('--em_max_iter', type=int, default=100)
     parser.add_argument('--round', type=int, default=5000)
+    args = parser.parse_args()
 
-    args=parser.parse_args()
-
-##### --- Loading System Configuration & Environment ---
+    # 3. Load Configuration
     config = utils.load_yaml_config(CONFIG_PATH)
-    if not (config):
-        print("Configuration loading failed.")
+    if not config:
+        print("[System] Configuration loading failed.")
         return
     
-    LOOP = config.get('LOOP')
-    
-    DATASET_FOLDER = config['DATASET_FOLDER']
-    ENV_CONFIG = config['ENV_CONFIG']
-
-    ENV_CONFIG_PATH = os.path.join(DATASET_FOLDER, ENV_CONFIG)
-
-    env_config = utils.load_yaml_config(ENV_CONFIG_PATH)
-    if not (env_config):
-        print("Environment Configuration loading failed.")
+    # Load Environment Config
+    dataset_folder = os.path.join(DATASET_ROOT, config['DATASET_FOLDER'])
+    env_config_path = os.path.join(dataset_folder, config['ENV_CONFIG'])
+    env_config = utils.load_yaml_config(env_config_path)
+    if not env_config:
+        print("[System] Environment config loading failed.")
         return
-    
     config.update(env_config)
-    
-##### --- Reference Point Setup ---
-    reference_grid, x_bounds, y_bounds, x_width, y_width = utils.generate_reference_grid(config)
-    
-##### --- Put Hyperparameter into Config ---
+
+    # Update Config with Args
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
     
+    # Generate Reference Grid
+    reference_grid, x_bounds, y_bounds, x_width, y_width = utils.generate_reference_grid(config)
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
     config['X_WIDTH'] = x_width
     config['Y_WIDTH'] = y_width
 
-##### --- Create Checkpoint Directory and Path ---
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    SCENE_NAME = config.get('SCENARIO_NAME', 'Untitled_Scene')
-    MODEL_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, f"{SCENE_NAME}.ckpt")
-
-##### --- Static Resource Loading and Initialization ---
+    # 4. Load Static Resources
     try:
         mat = scipy.io.loadmat("directions.mat")
-        DIRECTIONS_VECTORS = mat['directions']
-
-    except (FileNotFoundError, KeyError) as e:
-        print(f"[TRANSFORMER ERROR] Could not load resource: {e}. Check if 'directions.mat' is in root and key is 'directions'. Exiting.")
+        directions_vectors = mat['directions']
+        print("[System] directions.mat loaded successfully.")
+    except Exception as e:
+        print(f"[System] Failed to load directions.mat: {e}")
         return
 
-    device = DEVICE
+    # Prepare Checkpoint Path
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    scene_name = config.get('SCENARIO_NAME', 'Untitled_Scene')
+    ckpt_path = os.path.join(CHECKPOINT_DIR, f"{scene_name}.ckpt")
 
-##### --- Create 3 Queue and KeyboardInterrupt Stop Event ---
-    csi_data_queue = JoinableQueue() # CSI Blocks Producter -> CSI2TRAJECTORY Worker
-    trajectory_queue = Queue()  # CSI2TRAJECTORY Worker -> TRANSFORMER Worker
-    model_queue = Queue() # TRANSFORMER Worker -> CSI2TRAJECTORY Worker
+    # 5. Setup IPC Queues
+    queues = {
+        'data': JoinableQueue(), # Input: Raw CSI
+        'result': Queue(),       # Output: Trajectory
+        'model': Queue()         # Update: Model Weights
+    }
     stop_event = Event()
 
-##### --- Processes for the Two-stage Pipeline
-    csi2trajectory_worker_process = Process(
-        target=CSI2TRAJECTORY_worker, 
-        args=(csi_data_queue, trajectory_queue, model_queue, config, reference_grid, DIRECTIONS_VECTORS, device)
-    )
-    transformer_worker_process = Process(
-        target=TRANSFORMER_worker, 
-        args=(trajectory_queue, model_queue, config, DIRECTIONS_VECTORS, MODEL_CHECKPOINT_PATH, stop_event, device)
-    )
-
-##### --- Start the Concurrent Execution of the Two Worker Processes
-    csi2trajectory_worker_process.start()
-    transformer_worker_process.start()
-
-##### --- Load and Process CSI dataset ---
-    Hmatrix_list = config.get('HMATRIX_LIST')
-    if not Hmatrix_list:
-        print("[Error] 'HMATRIX_LIST' is missing or empty in config.")
-        return
+    # 6. Initialize Workers
+    print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
+    # CSI Worker (Inference)
+    csi_worker = CSI_Worker(
+        name="CSI_Worker",
+        config=config,
+        queues=queues,
+        stop_event=stop_event,
+        reference_grid=reference_grid,
+        directions_vectors=directions_vectors
+    )
+
+    # AI Worker (Training)
+    tfm_worker = TFM_Worker(
+        name="AI_Worker",
+        config=config,
+        queues=queues,
+        stop_event=stop_event,
+        directions_vectors=directions_vectors,
+        checkpoint_path=ckpt_path
+    )
+
+    # 7. Start Processes
+    csi_worker.start()
+    tfm_worker.start()
+
+    # 8. Data Injection & Collection Loop
+    hmatrix_list = config.get('HMATRIX_LIST', [])
+    all_trajectories = [] # Buffer to store results
+
     try:
-        # LOOP
+        loop_mode = config.get('LOOP', False)
         while True:
-            # Multiple Hmatrix
-            for Hmatrix_file in Hmatrix_list:
-                Hmatrix_path = os.path.join(DATASET_FOLDER, Hmatrix_file)
-
-                csi_blocks_list = utils.load_and_preprocess_csi_dataset(
-                    Hmatrix=Hmatrix_path,
+            for hmatrix_file in hmatrix_list:
+                hmatrix_path = os.path.join(dataset_folder, hmatrix_file)
+                
+                # Load CSI Data
+                csi_blocks = utils.load_and_preprocess_csi_dataset(
+                    Hmatrix=hmatrix_path,
                     config=config,
-                    device=device
+                    device=DEVICE
                 )
 
-                if csi_blocks_list:
-                    for csi_block in csi_blocks_list:
-                        csi_data_queue.put(csi_block)
-                    print(f"\n[Pipeline] Queued {len(csi_blocks_list)} CSI blocks for processing.")
-                    csi_data_queue.join()
-                else:
-                    print("[Pipeline] No CSI blocks generated. Exiting.")
-                    return
+                if not csi_blocks:
+                    print("[System] No data loaded.")
+                    break
 
-            if not LOOP:
+                print(f"\n[System] Injecting {len(csi_blocks)} CSI blocks...")
+                
+                for block in csi_blocks:
+                    # A. Inject Data
+                    queues['data'].put(block)
+                    
+                    # B. Collect Results (Non-blocking check)
+                    while not queues['result'].empty():
+                        try:
+                            res = queues['result'].get_nowait()
+                            
+                            # Parse result (Handle Dict from Proposed or Tensor from Baseline)
+                            traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
+                            
+                            if isinstance(traj, torch.Tensor):
+                                traj = traj.detach().cpu().numpy()
+                            
+                            all_trajectories.append(traj)
+                        except Empty:
+                            break
+                        except Exception as e:
+                            print(f"[System] Collection error: {e}")
+
+            if not loop_mode:
                 break
+        
+        # Flush remaining results after injection is done
+        print("[System] Waiting for remaining results...")
+        time_waited = 0
+        while time_waited < 5.0: # 5 seconds timeout
+            if not queues['result'].empty():
+                res = queues['result'].get()
+                traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
+                if isinstance(traj, torch.Tensor):
+                    traj = traj.detach().cpu().numpy()
+                all_trajectories.append(traj)
+                time_waited = 0 # Reset timeout if data received
+            else:
+                time.sleep(0.1)
+                time_waited += 0.1
 
-##### --- Wait for Workers to Complete, ensuring graceful termination and cleanup on interrupt
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        transformer_worker_process.join(timeout=10)
-
-        if csi2trajectory_worker_process.is_alive():
-            csi2trajectory_worker_process.terminate()
-        if transformer_worker_process.is_alive():
-            transformer_worker_process.terminate()
-
-        csi2trajectory_worker_process.join()
-        transformer_worker_process.join()
-        print("[Main] Cleanup complete.")
-
-##############################################
-########## --- CSI to Trajectory --- #########
-##############################################
-
-def CSI2TRAJECTORY_worker(
-    csi_data_queue: Queue,
-    trajectory_queue: Queue, 
-    model_queue: Queue, 
-    config: Dict[str, Any], 
-    reference_grid: Any,
-    directions_vectors: np.ndarray, 
-    device: torch.device
-):
-
-##### --- Initialize Model ---
-    current_model_config = {
-        'type': 'MARKOV',
-    }
-    current_transformer_model = None
-
-##### --- LOS/NLOS ration for each AP --- 
-    ap_data = config.get('ACCESS_POINTS', {})
-    Q = len(ap_data)
-    T = config['NUM_SAMPLE']
-    SLEEP = config.get('CSItoTRAJECTORY_SLEEP_S')
-
-    epsilon = 1e-6
-    random_noise = torch.rand(Q, T, 2, device=device) * epsilon
-
-##### --- Dynamic parameters ---
-    context = {
-        'last_predicted_point': None,
-    }
-
-    # Initialize and Ready to Save Entire Predicted Trajectory
-    full_trajectory_history = []
-
-    print("[CSI2TRAJ] Waiting for initial Transformer model state from Worker...")
-    try:
-        new_model_config = model_queue.get(timeout=3) # Wait for 3 Seconds
-
-        if new_model_config['type'] == 'TRANSFORMER':
-            current_transformer_model = create_transformer_instance(config, N_DIRECTIONS, device)
-            current_transformer_model.load_state_dict(new_model_config['weights'])
-            current_transformer_model.to(device)
-            current_transformer_model.eval()
-            current_model_config = new_model_config
-            print(f"[CSI2TRAJ] Received initial model V{current_model_config.get('version', 'N/A')}. Starting trajectory generation in TRANSFORMER mode.")
+        # Save Final Trajectory
+        if all_trajectories:
+            full_path = np.concatenate(all_trajectories, axis=0)
+            os.makedirs("output", exist_ok=True)
+            save_path = os.path.join("output", "predicted_trajectory.npy")
+            np.save(save_path, full_path)
+            print(f"[System] Trajectory saved to: {save_path} (Shape: {full_path.shape})")
         else:
-            print("[CSI2TRAJ] Initial model setup is MARKOV or failed. Defaulting to MARKOV mode.")
-            
-    except Exception as e:
-        print(f"[CSI2TRAJ] Error or timeout waiting for initial model: {e}. Defaulting to MARKOV mode.")
-
-##### --- Implement CSItoTRAJ ---
-    round_counter = 0
-    try:
-        while round_counter < config['ROUND']: # use while when it is RT system
-
-            if not csi_data_queue.empty():  
-                current_csi_block = csi_data_queue.get()
-            else:
-                continue
-
-            # Check Whether There is a New Transformer Model can be Used
-            if not model_queue.empty():
-                new_model_config = model_queue.get()
-
-                if new_model_config['type'] == 'TRANSFORMER':
-                    if current_transformer_model is None:
-                        current_transformer_model = create_transformer_instance(config, N_DIRECTIONS, device)
-
-                    current_transformer_model.load_state_dict(new_model_config['weights'])
-                    current_transformer_model.to(device)
-                    current_transformer_model.eval()
-                    current_model_config = new_model_config
-            else:
-                pass
-
-            if current_model_config['type'] == 'MARKOV':
-                mode='MARKOV'
-                model=None
-
-            elif current_model_config['type'] == 'TRANSFORMER':
-                mode='TRANSFORMER'
-                model=current_transformer_model
-
-            trajectory = (
-                run_csi2traj(
-                    config=config, 
-                    reference_grid=reference_grid, 
-                    context=context, 
-                    model=model, 
-                    mode=mode, 
-                    directions_vectors=directions_vectors, 
-                    raw_csi_data=current_csi_block,
-                )
-            )
-
-            DEBUG = True
-            if DEBUG:
-                print("final: ", trajectory)
-
-            context['last_predicted_point'] = trajectory[-1:].clone().detach()
-
-            trajectory_queue.put(trajectory.clone().detach())
-
-            # Save Predicted Trajectory
-            traj_numpy = trajectory.detach().cpu().numpy()
-            full_trajectory_history.append(traj_numpy) 
-            accumulated_path = np.concatenate(full_trajectory_history, axis=0)
-            np.save('print_stuff/predicted_trajectory.npy', accumulated_path)
-
-            round_counter += 1
-            time.sleep(SLEEP)
-
-            if DEVICE.type == 'cuda':
-                torch.cuda.empty_cache()
-
-            # Tell the Main Process that the data has been processed!
-            csi_data_queue.task_done()
+            print("[System] No trajectory data collected.")
 
     except KeyboardInterrupt:
-        return
-
-
-##############################################
-######## --- Transformer Training --- ########
-##############################################
-
-def TRANSFORMER_worker(
-    trajectory_queue: Queue, 
-    model_queue: Queue, 
-    config: Dict[str, Any], 
-    directions_vectors: np.ndarray, 
-    checkpoint_path: str, 
-    stop_event: Event,  # pyright: ignore[reportInvalidTypeForm]
-    device: torch.device
-):
-
-##### --- Parameters Setup ---
-    TRAINING_EPOCHS = config['TRAINING_EPOCHS']
-    BATCH_SIZE = config['BATCH_SIZE']
-    MIN_TRAJECTORIES_TO_TRAIN = config['MIN_TRAJ_TO_TRAIN']
-    SLEEP = config['TRANSFORMER_SLEEP_S']
-
-    SOS_TOKEN = N_DIRECTIONS
-
-##### --- Instantiation ---
-    model = create_transformer_instance(config, N_DIRECTIONS, device)
+        print("\n[System] Stopping...")
     
-##### --- Optimization ---
-    optim = NoamOpt(
-        config['EMB_SIZE'],
-        config['NOAMOPT_FACTOR'],
-        config['NOAMOPT_WARMUP_STEPS'], 
-        torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
-    )
-
-    trajectory_buffer: List[torch.Tensor] = []
-    current_version = 0
-
-##### --- Conditional Checkpoint Load ---
-
-    checkpoint_loaded_successfully = False
-    if os.path.exists(checkpoint_path):
-        try:
-            checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=device)
-
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optim.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-            loaded_step = checkpoint.get('noam_step', 0)
-            if loaded_step > 0:
-                optim._step = loaded_step
-
-            current_version = checkpoint.get('version', 0)
-
-            checkpoint_loaded_successfully = True
-            
-            print(f"[TRANSFORMER] Loaded checkpoint V{current_version} for scene '{os.path.basename(checkpoint_path)}'. Continuing training.")
-            
-        except Exception as e:
-            print(f"[TRANSFORMER ERROR] Failed to load checkpoint {checkpoint_path}. Starting from scratch. Error: {e}")
-    else:
-        print(f"[TRANSFORMER] No checkpoint found. Starting V1 training from scratch.")
-
-    if checkpoint_loaded_successfully:
-        # Push Initial Model into Model Queue
-            initial_model_config = {
-                'version': current_version,
-                'type': 'TRANSFORMER',
-                'weights': {k: v.cpu() for k, v in model.state_dict().items()},
-            }
-            model_queue.put(initial_model_config)
-    else:
-        print("[TRANSFORMER] Cold Start or load failed. Skipping initial model push.")
-
-##### --- Online Learning Core Loop ---
-    try:
-        while not stop_event.is_set():
-            # Data Collection
-            if not trajectory_queue.empty():
-                trajectory_buffer.append(trajectory_queue.get())
-                
-            # To Trigger Training
-            if len(trajectory_buffer) >= MIN_TRAJECTORIES_TO_TRAIN:
-                print("[TRANSFORMER] Start Training...")
-
-                model.train()
-                trajs_for_batch = trajectory_buffer[:MIN_TRAJECTORIES_TO_TRAIN]
-                data_tensor = torch.stack(trajs_for_batch, dim=0)
-                
-                try:
-                    # inp_coords: (N, T-1, 2) | target_ids: (N, T-1)
-                    inp_coords, target_ids = convert_long_trajectory_to_ids(
-                        data_tensor, directions_vectors, device
-                    )
-                except Exception as e:
-                    print(f"[TRANSFORMER ERROR] Long sequence conversion failed: {e}. Skipping batch.")
-                    import traceback
-                    traceback.print_exc()
-                    trajectory_buffer = trajectory_buffer[MIN_TRAJECTORIES_TO_TRAIN:]
-                    continue
-                    
-                train_dataset = TensorDataset(inp_coords, target_ids)
-
-                total_batches = 0
-                current_epoch_loss = 0.0
-
-                for epoch_i in range(TRAINING_EPOCHS):
-                    tr_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-                
-                    epoch_loss = 0.0
-
-                    for id_b, (inp, target) in enumerate(tr_dl):
-                        
-                        optim.optimizer.zero_grad()
-                        n_in_batch = inp.shape[0]
-                        
-                        # Prepare the Causal Mask
-                        trg_att = subsequent_mask(target.shape[1]).repeat(n_in_batch, 1, 1).to(device)
-                        
-                        # Prepare Teacher Forcing input: [SOS | Target IDs (x2...xT-1)]
-                        start_of_seq = torch.tensor([SOS_TOKEN]).repeat(n_in_batch).unsqueeze(1).to(device)
-                        dec_inp = torch.cat((start_of_seq, target[:,:-1]), 1)
-                        
-                        # Encoder(inp) + Decoder(dec_inp_teacher)
-                        out = model(inp, dec_inp, None, trg_att)
-                        
-                        # Loss Calculation (Cross-Entropy)
-                        loss = F.cross_entropy(out.view(-1, out.shape[-1]), target.view(-1), reduction='mean')
-                        
-                        loss.backward()
-                        optim.step()
-
-                        time.sleep(SLEEP)
-                        epoch_loss += loss.item()
-                        total_batches += 1
-                        current_epoch_loss += loss.item()
-                    
-                    # print(f"[TRANSFORMER] V{current_version + 1} Epoch {epoch_i + 1}/{TRAINING_EPOCHS} Loss: {epoch_loss/len(tr_dl):.4f}")
-                    
-                # Model Publication
-                current_version += 1
-                avg_loss = current_epoch_loss / total_batches
-                new_model_config = {
-                    'version': current_version,
-                    'type': 'TRANSFORMER',
-                    'weights': {k: v.cpu() for k, v in model.state_dict().items()},
-                }
-                
-                model_queue.put(new_model_config)
-                print(f"[TRANSFORMER] Finished training V{current_version}. Final Avg Loss: {avg_loss:.4f}. Sent to CSI Worker.")
-                
-                # Clean up the used buffer
-                trajectory_buffer = trajectory_buffer[MIN_TRAJECTORIES_TO_TRAIN:]
-
-                if DEVICE.type == 'cuda':
-                    torch.cuda.empty_cache()
-                
-            else:
-                time.sleep(SLEEP)
-
-    except KeyboardInterrupt:
-        print(f"\n[TRANSFORMER] KeyboardInterrupt received. Setting stop_event for graceful checkpoint save.")
+    finally:
+        # 9. Graceful Shutdown
         stop_event.set()
+        
+        tfm_worker.join(timeout=2)
+        csi_worker.join(timeout=2)
 
-    # Final state save
-    print(f"[TRANSFORMER] Saving final state V{current_version} before exiting...")
-    try:
-        torch.save({
-            'version': current_version,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optim.optimizer.state_dict(),
-            'noam_step': optim._step,
-        }, checkpoint_path)
-        print(f"[TRANSFORMER] Successfully saved final state V{current_version}.")
-    except Exception as e:
-        print(f"[TRANSFORMER ERROR] Failed to save checkpoint at {checkpoint_path}. Error: {e}")
+        if tfm_worker.is_alive(): tfm_worker.terminate()
+        if csi_worker.is_alive(): csi_worker.terminate()
+        
+        print("[System] Shutdown complete.")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

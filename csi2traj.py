@@ -6,7 +6,6 @@ import numpy as np
 def run_csi2traj(
         config: Dict[str, Any], 
         reference_grid: torch.Tensor, 
-        context: Dict[str, Any], 
         model: Optional[torch.nn.Module], 
         mode: str, 
         directions_vectors: np.ndarray, 
@@ -36,7 +35,6 @@ def run_csi2traj(
         feature_matrix=feature_matrix,
         config=config,
         reference_grid=reference_grid,
-        context=context, 
         model=model, 
         mode=mode, 
         directions_vectors=directions_vectors
