@@ -26,19 +26,39 @@ class MMP_Algorithm:
         input_csi: torch.Tensor, # (QT, N, M)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
-    ##### --- Construct CSI Enhance Matrix ---
+        # --- Construct CSI Enhance Matrix ---
         input_csi_enhance = self._construct_enhance_matrix(input_csi)
 
-    ##### --- Find partition the Unitary Matrix U of the left singular values ---
+        # --- Find partition the Unitary Matrix U of the left singular values ---
         Us_left_singular_vectors = self._get_left_singular_vectors(input_csi_enhance)
 
-    ##### --- ToF ---
+        # --- ToF ---
         tof_tensor, eigv_y, principal_left_singular_vector = self._estimate_tof_logic(Us_left_singular_vectors) 
         
-    ##### --- AoA ---
-        aoa_tensor_flat, eigv_x = self._estimate_aoa_logic(Us_left_singular_vectors, principal_left_singular_vector)
+        # --- AoA ---
+        aoa_tensor, eigv_x = self._estimate_aoa_logic(Us_left_singular_vectors, principal_left_singular_vector)
+
+        # --- Gain ---
+        gains_tensor = self._estimate_path_gains(input_csi, eigv_x, eigv_y)
+
+        # --- Threshold ---
+        THRESHOLD_RATIO = 0.1 
+        max_gains, _ = torch.max(gains_tensor, dim=1, keepdim=True)
+        gain_threshold = max_gains * THRESHOLD_RATIO
+
+        # --- Create ToF Mask ---
+        masked_tof = tof_tensor.clone()
+        noise_mask = gains_tensor < gain_threshold
+        masked_tof[noise_mask] = float('inf')
+
+        # --- Sort by ToF Ascending ---
+        sorted_tof_values, indices = torch.sort(masked_tof, dim=1, descending=False)
+
+        sorted_aoa = torch.gather(aoa_tensor, 1, indices)
+        sorted_tof = torch.gather(tof_tensor, 1, indices) 
+        sorted_gain = torch.gather(gains_tensor, 1, indices)
         
-        return aoa_tensor_flat, tof_tensor, eigv_x, eigv_y
+        return sorted_aoa, sorted_tof, sorted_gain
     
 
     def _estimate_tof_logic(self, Us_left_singular_vectors: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -60,43 +80,31 @@ class MMP_Algorithm:
     ##### --- eigv_y -> ToF ---
         tof_tensor = self._eigv_y_to_tof(eigv_y)
 
-    ##### --- Find Main Path through Min ToF --- TODO:未來可以留著其他aoa增加線索
-        min_tof_values, min_indices = torch.min(tof_tensor, dim=1)
-        batch_size, L, _ = eigenvector_matrix.shape
-        gather_indices = min_indices.view(batch_size, 1, 1).expand(batch_size, L, 1)
-        principal_left_singular_vector = torch.gather(eigenvector_matrix, 2, gather_indices)
-        # principal_left_singular_vector.shape = (batch, L)
-
-        return tof_tensor, eigv_y, principal_left_singular_vector
+        return tof_tensor, eigv_y, eigenvector_matrix
 
 
-    def _estimate_aoa_logic(self, Us_left_singular_vectors: torch.Tensor, principal_left_singular_vector: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _estimate_aoa_logic(self, Us_left_singular_vectors: torch.Tensor, eigenvector_matrix: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         alpha = self.alpha
 
-    ##### --- Find Diagonalizable Matrix ---
+        # --- Find Diagonalizable Matrix ---
         Us_upper = Us_left_singular_vectors[:, :alpha, :]
         Us_lower = Us_left_singular_vectors[:, alpha:, :]
 
-        pinv_Us_upper = torch.linalg.pinv(Us_upper)
-        target_matrix = pinv_Us_upper @ Us_lower
+        # --- Find eigv_x ---
+        projected_upper = Us_upper @ eigenvector_matrix
+        projected_lower = Us_lower @ eigenvector_matrix
+        
+        upper_conj = projected_upper.conj()
+        numerator = torch.sum(upper_conj * projected_lower, dim=1)
+        denominator = torch.sum(upper_conj * projected_upper, dim=1)
 
-    ##### --- Diagonalization ---
-        eigv_x, _ = torch.linalg.eig(target_matrix)
-        # eigv_x.shape: (batch, L)
+        eigv_x = numerator / denominator
 
-    ##### --- Find eigv_x1 ---
-        A = (Us_upper @ principal_left_singular_vector).mH
-        B = Us_lower @ principal_left_singular_vector
-        C = Us_upper @ principal_left_singular_vector
+        # --- eigv_x -> AoA ---
+        aoa_tensor = self._eigv_x_to_aoa(eigv_x)
 
-        eigv_x1 = ((A @ B) / (A @ C)).squeeze()
-
-    ##### --- eigv_x1 -> AoA ---
-        aoa_tensor_flat = self._eigv_x1_to_aoa(eigv_x1)
-
-        return aoa_tensor_flat, eigv_x
-
+        return aoa_tensor, eigv_x
 
     def _construct_enhance_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
 
@@ -179,7 +187,7 @@ class MMP_Algorithm:
 
         return tof_tensor
 
-    def _eigv_x1_to_aoa(self, eigv_x1: torch.Tensor) -> torch.Tensor:
+    def _eigv_x_to_aoa(self, eigv_x1: torch.Tensor) -> torch.Tensor:
 
         ln_x1 = torch.log(eigv_x1)
         ln_x1_imag = ln_x1.imag
@@ -194,3 +202,26 @@ class MMP_Algorithm:
         aoa_degrees = aoa_radians * (180.0 / torch.pi)  # degree range: (-90, 90)
 
         return aoa_degrees
+    
+    def _estimate_path_gains(self, input_csi: torch.Tensor, eigv_x: torch.Tensor, eigv_y: torch.Tensor) -> torch.Tensor:
+        batch_size, N, M = input_csi.shape
+        _, L = eigv_x.shape
+        device = input_csi.device
+
+        # Spatial Steering Vector
+        range_N = torch.arange(N, device=device).float()
+        S_spatial = eigv_x.unsqueeze(2).pow(range_N) # (B, L, N)
+
+        # Frequency Steering Vector
+        range_M = torch.arange(M, device=device).float()
+        S_freq = eigv_y.unsqueeze(2).pow(range_M) # (B, L, M)
+
+        # Combined Steering Matrix
+        S_combined = S_spatial.unsqueeze(3) * S_freq.unsqueeze(2)
+        S_matrix = S_combined.reshape(batch_size, L, N * M).transpose(1, 2) # (B, NM, L)
+
+        # Least Squares
+        y_vec = input_csi.reshape(batch_size, N * M, 1)
+        complex_gains = torch.linalg.pinv(S_matrix) @ y_vec 
+        
+        return complex_gains.squeeze(2).abs() # Return Magnitude

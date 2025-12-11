@@ -1,7 +1,8 @@
 import torch
 from core.interfaces import ISignalProcessor
 
-from csi_analysis_stage.baseline.processor import run_csi_analysis
+from csi_analysis_stage.baseline.processor import BaselineProcessor
+from csi_analysis_stage.proposed.processor import ProposedProcessor
 
 class BaselineAnalysisStrategy(ISignalProcessor):
     """
@@ -11,14 +12,15 @@ class BaselineAnalysisStrategy(ISignalProcessor):
         self.config = config
         self.device = device
 
+        self.processor = BaselineProcessor(config)
+
     def extract(self, raw_csi_block):
         """
         Input: [Q, T, N, M]
         Output: Features [Q, T, 3] (Power, Angle, Delay)
         """
-        feature_matrix = run_csi_analysis(
-            raw_csi_data=raw_csi_block,
-            config=self.config
+        feature_matrix = self.processor.process(
+            raw_csi_data=raw_csi_block
         )
         
         return {
@@ -34,15 +36,16 @@ class ProposedAnalysisStrategy(ISignalProcessor):
         self.config = config
         self.device = device
 
+        self.processor = ProposedProcessor(config)
+
     def extract(self, raw_csi_block):
         """
         Input: [Q, T, N, M]
         Output: Features [Q, T, 4], SPD [Q, T, N, N]
         """
         # 1. Extract MMP features (AoA, ToF, AS, DS) -> [Q, T, 4]
-        feature_matrix = run_csi_analysis(
-            raw_csi_data=raw_csi_block,
-            config=self.config
+        feature_matrix = self.processor.process(
+            raw_csi_data=raw_csi_block
         )
         
         # 2. Compute SPD Matrix -> [Q, T, N, N]

@@ -2,8 +2,8 @@
 LOOP: False
 
 ### --- System Mode --- ###
-SYSTEM_MODE: 'BASELINE'
-#SYSTEM_MODE: 'PROPOSED'
+#SYSTEM_MODE: 'BASELINE'
+SYSTEM_MODE: 'PROPOSED'
 
 ### --- Environment & Trajectory --- ###
 DATASET_FOLDER: "dataset_easyspace"

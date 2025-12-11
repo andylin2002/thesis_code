@@ -1,43 +1,82 @@
 import numpy as np
 from typing import Dict, Any, Optional
 import os
-
-from .._common.preprocessing import run_data_processor
-from .._common.extraction import run_feature_extractor
-
 import torch
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# Import common utilities
+from .._common.preprocessing import run_data_processor
+from .._common.extraction.mmp_core import MMP_Algorithm
+from .._common.extraction import power_extractor, delay_estimator
 
-def run_csi_analysis(
-        raw_csi_data: torch.Tensor, 
-        config: Dict[str, Any]
-) -> Optional[torch.Tensor]:
+class BaselineProcessor:
+    def __init__(self, config: Dict[str, Any]):
+        """
+        One-time initialization.
+        """
+        self.config = config
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        self.mmp_engine = MMP_Algorithm(config=config)
+        
+        # Cache config parameters
+        self.ap_data = config.get('ACCESS_POINTS', {})
+        self.num_ap = len(self.ap_data)
+        self.num_sample = config['NUM_SAMPLE']
 
-##### --- Data Preprocessing (on GPU) ---
-    processed_csi = run_data_processor(
-        raw_csi_data=raw_csi_data,
-        config=config
-    )
+    def process(self, raw_csi_data: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Process batch data.
+        """
+        # Data Preprocessing
+        processed_csi = run_data_processor(
+            raw_csi_data=raw_csi_data,
+            config=self.config
+        )
 
-##### --- Feature Extraction (on GPU) ---
-    feature_matrix = run_feature_extractor(
-        processed_csi=processed_csi,
-        config=config
-    )
+        # Prepare Batch
+        num_batch = self.num_ap * self.num_sample
+        # (QT, N, M) - Ensure reshape logic aligns with data structure
+        batch_input_csi = processed_csi.reshape(num_batch, *processed_csi.shape[2:]).contiguous()
 
-    DEBUG = True
-    if DEBUG:
+        # Feature Extraction
+        # --- Power ---
+        power_flat = power_extractor.extract_power_batch(
+            input_csi=batch_input_csi
+        )
+
+        # --- Angle ---
+        aoa_all_paths, tof_all_paths, gain_all_paths = self.mmp_engine.estimate_aoa_tof_batch(
+            input_csi=batch_input_csi
+        )
+        angle_flat = aoa_all_paths[:, 0]
+
+        # --- Delay ---
+        delay_flat = delay_estimator.estimate_delay_batch(num_batch, batch_input_csi)
+
+        # Stacking & Reshape
+        # Feature combo: [Power, Angle, Delay]
+        features_stacked_flat = torch.stack([
+            power_flat, 
+            angle_flat, 
+            delay_flat
+        ], dim=1)
+
+        feature_matrix = features_stacked_flat.reshape(self.num_ap, self.num_sample, 3)
+
+        DEBUG = True
+        if DEBUG:
+            self._save_debug_info(feature_matrix)
+
+        return feature_matrix
+
+    def _save_debug_info(self, feature_matrix):
+        """Helper function to save debug info."""
         try:
             feature_matrix_np = feature_matrix.detach().cpu().numpy()
-            
             save_path = "output/csi_feature_matrix.npy"
-            
+            os.makedirs("output", exist_ok=True) # Ensure directory exists
             np.save(save_path, feature_matrix_np)
-            print(f"[System] Feature matrix saved to: {os.path.abspath(save_path)}")
-            print(f"[System] Matrix Shape: {feature_matrix_np.shape} (Expect: Q x T x 3)")
-            
+            print(f"[BaselineProcessor] Feature matrix saved to: {os.path.abspath(save_path)}")
+            print(f"[BaselineProcessor] Shape: {feature_matrix_np.shape} (Expect: Q x T x 3)")
         except Exception as e:
             print(f"[Error] Failed to save feature matrix: {e}")
-
-    return feature_matrix
