@@ -1,4 +1,5 @@
 import torch
+from .grid_tools import convert_grid_indices_to_coords
 
 class ViterbiPathManager:
     def __init__(self, G: int, T: int, reference_grid: torch.Tensor, device: torch.device):
@@ -33,7 +34,7 @@ class ViterbiPathManager:
             temp_indices = parents              # Move pointer backward
 
         # Map indices to physical coordinates (G, seq_len, 2)
-        valid_coords = self.reference_grid[path_indices]
+        valid_coords = convert_grid_indices_to_coords(path_indices, self.reference_grid)
         
         return valid_coords
 

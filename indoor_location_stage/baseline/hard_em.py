@@ -3,17 +3,18 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from . import em_calculator as emc
-from .path_manager import ViterbiPathManager
-from markov_model.uniform_markov import generate_uniform_markov_trajectory
-from transformer.transformer_tool import generate_transformer_trajectory
+from . import hard_em_utils
+from .._common import grid_tools
+from .._common import math_tools
+
+from .._common.path_manager import ViterbiPathManager
 
 TypeTrajectory = torch.Tensor
 TypePropParams = Dict[str,torch.Tensor]
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-class EM_Algorithm:
+class HardEM_Algorithm:
     def __init__(
             self, 
             feature_matrix: torch.Tensor, 
@@ -39,7 +40,7 @@ class EM_Algorithm:
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']
 
-        self.ap_locations = emc.get_ap_locations(self.config, self.num_ap, DEVICE)
+        self.ap_locations = grid_tools.get_ap_locations(self.config, self.num_ap, DEVICE)
         self.ap_orientations = torch.tensor(
             [data.get('ORIENTATION_DEG', 0) for data in self.ap_data.values()], 
             dtype=torch.float32, 
@@ -111,14 +112,14 @@ class EM_Algorithm:
 
     ##### --- Initialize "POWER" parameters ---
         alpha_qk, beta_qk = (
-            emc.calculate_init_alpha_and_beta_qk(
+            hard_em_utils.calculate_init_alpha_and_beta_qk(
                 self.reference_grid, 
                 self.ap_locations, 
                 power_qt
             )
         )
         power_qk_var = (
-            emc.calculate_init_power_qk_var(
+            hard_em_utils.calculate_init_power_qk_var(
                 self.reference_grid, 
                 self.ap_locations, 
                 alpha_qk, 
@@ -129,7 +130,7 @@ class EM_Algorithm:
 
     ##### --- Initialize "ANGLE" parameters ---
         angle_k_var = (
-            emc.calculate_init_angle_k_var(
+            hard_em_utils.calculate_init_angle_k_var(
                 self.reference_grid, 
                 self.ap_locations, 
                 self.ap_orientations,
@@ -140,7 +141,7 @@ class EM_Algorithm:
     ##### --- Initialize "DELAY" parameters ---
         # Cluster Delay data globally and assign means and variances
         delay_flat = delay_qt.flatten()
-        delay_means, delay_vars = emc.estimate_two_gaussians(delay_flat)
+        delay_means, delay_vars = hard_em_utils.estimate_two_gaussians(delay_flat)
         delay_k_mean.copy_(delay_means.to(DEVICE))
         delay_k_var.copy_(delay_vars.clamp(min=MIN_VAR))
 
@@ -152,14 +153,14 @@ class EM_Algorithm:
 
         delay_11k_var = delay_11k_var * 1 * mean_distance.clamp(min=1.0)
         delay_distribution_qtk = (
-            emc.build_gaussian_distribution(
+            hard_em_utils.build_gaussian_distribution(
                 delay_11k_mean, 
                 delay_11k_var
             )
         )
         
         gamma_qtk = (
-            emc.calculate_init_gamma_qtk(
+            hard_em_utils.calculate_init_gamma_qtk(
                 delay_distribution_qtk, 
                 delay_qt
             )
@@ -218,9 +219,9 @@ class EM_Algorithm:
         delay_qt = self.feature_matrix[:, :, 2]
         
     ##### --- Initialize Constants ---
-        L_qt = emc.calculate_L_qt(trajectory, self.ap_locations)
+        L_qt = hard_em_utils.calculate_L_qt(trajectory, self.ap_locations)
 
-        angle_qt_mean = emc.calculate_angle_qt_mean(trajectory, self.ap_locations, self.ap_orientations)
+        angle_qt_mean = hard_em_utils.calculate_angle_qt_mean(trajectory, self.ap_locations, self.ap_orientations)
         angle_qt1_mean = angle_qt_mean.unsqueeze(2)
 
     ##### --- Maximize 'Marginal Emission Probability Log Likelihood' until converge ---
@@ -230,21 +231,23 @@ class EM_Algorithm:
             propagation_params_old = {k: v.clone() for k, v in propagation_params.items()}
 
             power_qk_average = (
-                emc.calculate_weighted_average(
-                    power_qt, 
-                    propagation_params['gamma_qtk']
+                math_tools.calculate_weighted_average(
+                    data=power_qt.unsqueeze(2),                 # [Q, T, 1]
+                    weights=propagation_params['gamma_qtk'],    # [Q, T, K]
+                    dim=1
                 )
             )
             L_qk_average = (
-                emc.calculate_weighted_average(
-                    L_qt, 
-                    propagation_params['gamma_qtk']
+                math_tools.calculate_weighted_average(
+                    data=L_qt.unsqueeze(2),                     # [Q, T, 1]
+                    weights=propagation_params['gamma_qtk'],    # [Q, T, K]
+                    dim=1
                 )
             )
 
         ##### --- Parameters Update related to Power ---
             propagation_params['alpha_qk'] = (
-                emc.calculate_alpha_qk(
+                hard_em_utils.calculate_alpha_qk(
                     power_qt, 
                     power_qk_average, 
                     L_qt, 
@@ -253,21 +256,21 @@ class EM_Algorithm:
                 )
             )
             propagation_params['beta_qk'] = (
-                emc.calculate_beta_qk(
+                hard_em_utils.calculate_beta_qk(
                     propagation_params['alpha_qk'], 
                     power_qk_average, 
                     L_qk_average
                 )
             )
             power_qtk_mean = (
-                emc.calculate_power_qtk_mean(
+                hard_em_utils.calculate_power_qtk_mean(
                     propagation_params['alpha_qk'], 
                     propagation_params['beta_qk'], 
                     L_qt
                 )
             )
             propagation_params['power_qk_var'] = (
-                emc.calculate_power_qk_var(
+                hard_em_utils.calculate_power_qk_var(
                     power_qt,
                     power_qtk_mean,   
                     propagation_params['gamma_qtk']
@@ -277,7 +280,7 @@ class EM_Algorithm:
             power_q1k_var = propagation_params['power_qk_var'].unsqueeze(1)
             
             power_distribution_qtk = (
-                emc.build_gaussian_distribution(
+                hard_em_utils.build_gaussian_distribution(
                     power_qtk_mean, 
                     power_q1k_var
                 )
@@ -285,7 +288,7 @@ class EM_Algorithm:
             
         ##### --- Parameters Update related to Angle ---
             propagation_params['angle_k_var'] = (
-                emc.calculate_angle_k_var(
+                hard_em_utils.calculate_angle_k_var(
                     angle_qt_mean, 
                     angle_qt, 
                     propagation_params['gamma_qtk']
@@ -294,7 +297,7 @@ class EM_Algorithm:
             angle_11k_var = propagation_params['angle_k_var'].view(1, 1, -1)
 
             angle_distribution_qtk = (
-                emc.build_gaussian_distribution(
+                hard_em_utils.build_gaussian_distribution(
                     angle_qt1_mean, 
                     angle_11k_var
                 )
@@ -302,13 +305,13 @@ class EM_Algorithm:
 
         ##### --- Parameters Update related to Delay ---
             propagation_params['delay_k_mean'] = (
-                emc.calculate_delay_k_mean(
+                hard_em_utils.calculate_delay_k_mean(
                     delay_qt, 
                     propagation_params['gamma_qtk']
                 )
             )
             propagation_params['delay_k_var'] = (
-                emc.calculate_delay_k_var(
+                hard_em_utils.calculate_delay_k_var(
                     propagation_params['delay_k_mean'], 
                     delay_qt, 
                     propagation_params['gamma_qtk']
@@ -319,18 +322,18 @@ class EM_Algorithm:
             delay_11k_var = propagation_params['delay_k_var'].view(1, 1, -1)
             
             delay_distribution_qtk = (
-                emc.build_gaussian_distribution(
+                hard_em_utils.build_gaussian_distribution(
                     delay_11k_mean, 
                     delay_11k_var
                 )
             )
             
         ##### --- Parameters Update related to Global LOS ratio ---
-            propagation_params['pi_k'] = emc.calculate_pi(propagation_params['gamma_qtk'])
+            propagation_params['pi_k'] = hard_em_utils.calculate_pi(propagation_params['gamma_qtk'])
 
         ##### --- Calculate 'Marginal Emission Probability Log Likelihood' for PropParams ---
             MEPLL_PropParams_new = (
-                emc.calculate_MEPLL_PropParams(
+                hard_em_utils.calculate_MEPLL_PropParams(
                     propagation_params['pi_k'], 
                     power_distribution_qtk, 
                     angle_distribution_qtk, 
@@ -343,7 +346,7 @@ class EM_Algorithm:
 
         ##### --- Parameters Update related to AP's LOS ratio ---
             propagation_params['gamma_qtk'] = (
-                emc.calculate_gamma_qtk(
+                hard_em_utils.calculate_gamma_qtk(
                     propagation_params['pi_k'], 
                     power_distribution_qtk, 
                     angle_distribution_qtk, 
@@ -396,7 +399,7 @@ class EM_Algorithm:
     ##### --- Fisrt: Construct G * T Emission Probability step ---
         # Calculate emission probabilities for all grid points over time
         emission_probability_gt = (
-            emc.calculate_emission_probability(
+            hard_em_utils.calculate_emission_probability(
                 feature_matrix,
                 reference_grid, 
                 propagation_params,
@@ -409,7 +412,7 @@ class EM_Algorithm:
     ##### --- Second: Viterbi Backpointer Updating step ---
         # Construct Neighbor Table
         G_index = torch.arange(G).to(DEVICE)
-        G_neighbor_index_matrix = emc.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
+        G_neighbor_index_matrix = grid_tools.get_all_neighbor_indices(config, G_index, DEVICE) # shape: (G, 9)
 
         # Initialize Path Manager
         path_manager = ViterbiPathManager(G, T, reference_grid, DEVICE)
@@ -429,7 +432,7 @@ class EM_Algorithm:
 
             # Find the best previous neighbor and max transition probability
             G_winner_neighbor_index, max_value = (
-                emc.get_winner_neighbor_info(
+                hard_em_utils.get_winner_neighbor_info(
                     G_neighbor_index_matrix, 
                     delta,
                     history_coords,

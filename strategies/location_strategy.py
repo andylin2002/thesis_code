@@ -1,11 +1,11 @@
 import torch
 from core.interfaces import ILocationEstimator
 
-# Legacy entry point (For Baseline)
-from indoor_location_stage import run_indoor_location
+# (For Baseline)
+from indoor_location_stage.baseline.hard_em import HardEM_Algorithm
 
-# New components (For Proposed)
-from indoor_location_stage.location_estimator import LocationEstimator as PhysicsLayer
+# (For Proposed)
+from indoor_location_stage.proposed.location_estimator import LocationEstimator as PhysicsLayer
 
 class BaselineLocationStrategy(ILocationEstimator):
     """
@@ -21,9 +21,9 @@ class BaselineLocationStrategy(ILocationEstimator):
     def estimate(self, signal_data):
         # Features shape: [Q, T, 3] (Power, Angle, Delay)
         feature_matrix = signal_data['features']
-        
-        # Call legacy function with MARKOV mode
-        trajectory = run_indoor_location(
+
+        # Initialize EM algorithm in 'MARKOV' mode
+        em_engine = HardEM_Algorithm(
             feature_matrix=feature_matrix,
             config=self.config,
             reference_grid=self.reference_grid,
@@ -31,6 +31,9 @@ class BaselineLocationStrategy(ILocationEstimator):
             mode='MARKOV',
             directions_vectors=self.directions_vectors
         )
+        
+        # Execute EM iterations to estimate optimal path
+        trajectory = em_engine.run_em_iterations()
             
         return trajectory
 

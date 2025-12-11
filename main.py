@@ -100,7 +100,7 @@ def main():
 
     # AI Worker (Training)
     tfm_worker = TFM_Worker(
-        name="AI_Worker",
+        name="TFM_Worker",
         config=config,
         queues=queues,
         stop_event=stop_event,

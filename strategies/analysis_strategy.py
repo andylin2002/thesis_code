@@ -1,8 +1,7 @@
 import torch
 from core.interfaces import ISignalProcessor
 
-# Import legacy entry point
-from csi_analysis_stage import run_csi_analysis
+from csi_analysis_stage.baseline.processor import run_csi_analysis
 
 class BaselineAnalysisStrategy(ISignalProcessor):
     """

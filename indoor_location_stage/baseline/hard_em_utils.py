@@ -6,12 +6,13 @@ import utils
 import numpy as np
 from transformer.transformer_tool import transformer_batch_predict_logits
 
+from .._common import grid_tools
+from .._common import math_tools
+
 
 TypeTrajectory = torch.Tensor
 
 def get_ap_locations(config: Dict[str, Any], Q: int, device: torch.Tensor) -> torch.Tensor:
-
-    DEVICE = device
 
     ap_locations_list = []
     for ap_id in range(1, Q + 1):
@@ -21,7 +22,7 @@ def get_ap_locations(config: Dict[str, Any], Q: int, device: torch.Tensor) -> to
         else:
             raise ValueError(f"Missing location data for AP ID {ap_id}")
         
-    ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=DEVICE)
+    ap_locations = torch.tensor(ap_locations_list, dtype=torch.float32, device=device)
 
     return ap_locations
 
@@ -198,7 +199,7 @@ def calculate_init_power_qk_var(
 
     K = 2
 
-    L_gq = calculate_L_gq(reference_grid, ap_locations)
+    L_gq = grid_tools.calculate_L_gq(reference_grid, ap_locations)
 
     alpha_q = alpha_qk[:, 0]
     beta_q = beta_qk[:, 0]
@@ -227,7 +228,7 @@ def calculate_init_angle_k_var(
         angle_qt: torch.Tensor, 
     ) -> torch.Tensor:
 
-    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations)
+    angle_gq_mean = grid_tools.calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations)
     angle_gq1_mean = angle_gq_mean.unsqueeze(2)
 
     angle_1qt = angle_qt.unsqueeze(0)
@@ -340,8 +341,7 @@ def calculate_angle_qt_mean(
     angle_deg_qt = torch.fmod(angle_deg_qt + 360.0, 360.0)
 
     ap_orientations_expanded = ap_orientations.unsqueeze(1).expand_as(angle_deg_qt) # shape: [Q, T]
-    diff = ap_orientations_expanded - angle_deg_qt
-    relative_angle_deg = torch.remainder(diff + 180.0, 360.0) - 180.0
+    relative_angle_deg = math_tools.angular_error(ap_orientations_expanded, angle_deg_qt)
     angle_qt_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_qt_mean
@@ -576,12 +576,12 @@ def calculate_emission_probability(
     
 ##### --- Grid Distance (L_gq) and Angle Mean Calculation ---
     # Calculate log10(Distance) for each grid point g to each AP q, shape (G, Q)
-    L_gq = calculate_L_gq(reference_grid, ap_locations).to(DEVICE)
+    L_gq = grid_tools.calculate_L_gq(reference_grid, ap_locations).to(DEVICE)
     # Reshape for broadcasting to (G, Q, 1, 1)
     L_gq11 = L_gq.unsqueeze(2).unsqueeze(3)
 
     # Calculate geometric angle mean for each grid point g to each AP q, shape (G, Q)
-    angle_gq_mean = calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations).to(DEVICE)
+    angle_gq_mean = grid_tools.calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations).to(DEVICE)
     # Reshape for broadcasting to (G, Q, 1, 1)
     angle_gq11_mean = angle_gq_mean.unsqueeze(2).unsqueeze(3)
     
@@ -650,8 +650,7 @@ def calculate_angle_gq_mean(
     angle_deg_gq = torch.fmod(angle_deg_gq + 360.0, 360.0)
 
     ap_orientations_expanded = ap_orientations.unsqueeze(0).expand_as(angle_deg_gq) # shape: [Q, T]
-    diff = ap_orientations_expanded - angle_deg_gq
-    relative_angle_deg = torch.remainder(diff + 180.0, 360.0) - 180.0
+    relative_angle_deg = math_tools.angular_error(ap_orientations_expanded, angle_deg_gq)
     angle_gq_mean = torch.clamp(relative_angle_deg, min=-90.0, max=90.0)
 
     return angle_gq_mean

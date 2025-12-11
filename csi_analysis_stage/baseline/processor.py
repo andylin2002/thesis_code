@@ -2,8 +2,8 @@ import numpy as np
 from typing import Dict, Any, Optional
 import os
 
-from .data_processor import run_data_processor
-from .feature_extractor import run_feature_extractor
+from .._common.preprocessing import run_data_processor
+from .._common.extraction import run_feature_extractor
 
 import torch
 
@@ -41,4 +41,3 @@ def run_csi_analysis(
             print(f"[Error] Failed to save feature matrix: {e}")
 
     return feature_matrix
-    
