@@ -1,11 +1,13 @@
 import torch
+from typing import Dict, Any
 from core.interfaces import ILocationEstimator
+from indoor_location_stage._common import grid_tools
 
 # (For Baseline)
-from indoor_location_stage.baseline.hard_em import HardEM_Algorithm
+from indoor_location_stage.baseline.estimator import BaselineEstimator
 
 # (For Proposed)
-from indoor_location_stage.proposed.location_estimator import LocationEstimator as PhysicsLayer
+from indoor_location_stage.proposed.estimator import ProposedEstimator
 
 class BaselineLocationStrategy(ILocationEstimator):
     """
@@ -18,22 +20,32 @@ class BaselineLocationStrategy(ILocationEstimator):
         self.reference_grid = reference_grid
         self.directions_vectors = directions_vectors
 
-    def estimate(self, signal_data):
+        # Pre-calculate AP info ONCE during initialization
+        self.num_ap = len(config['ACCESS_POINTS'])
+        self.ap_data_info = {
+            'locations': grid_tools.get_ap_locations(config, self.num_ap, device),
+            'orientations': torch.tensor(
+                [data.get('ORIENTATION_DEG', 0) for data in config['ACCESS_POINTS'].values()], 
+                dtype=torch.float32, 
+                device=device
+            )
+        }
+
+    def estimate(self, signal_data: Dict[str, Any]) -> torch.Tensor:
         # Features shape: [Q, T, 3] (Power, Angle, Delay)
-        feature_matrix = signal_data['features']
+        features = signal_data['features']
 
         # Initialize EM algorithm in 'MARKOV' mode
-        em_engine = HardEM_Algorithm(
-            feature_matrix=feature_matrix,
+        estimator = BaselineEstimator(
+            features=features,
             config=self.config,
             reference_grid=self.reference_grid,
-            model=None,
-            mode='MARKOV',
-            directions_vectors=self.directions_vectors
+            ap_data=self.ap_data_info, 
+            device=self.device
         )
         
-        # Execute EM iterations to estimate optimal path
-        trajectory = em_engine.run_em_iterations()
+        # Solve (Run EM + Viterbi)
+        trajectory = estimator.solve()
             
         return trajectory
 
@@ -48,58 +60,44 @@ class ProposedLocationStrategy(ILocationEstimator):
         self.reference_grid = reference_grid
         self.directions_vectors = directions_vectors
         self.transformer_model = transformer_model
-        
-        # Initialize Physics Layer (Soft EM & EPD Calculator)
-        self.physics_layer = PhysicsLayer(config, device)
-        
-        # Initialize Viterbi/Path Manager (Assuming it's available or wrapped in PhysicsLayer)
-        # For now, we assume physics_layer has a method to run viterbi, 
-        # or you can import your Viterbi class here.
-        # self.viterbi = ViterbiPathManager(...) 
 
-    def estimate(self, signal_data):
+        # Pre-calculate AP info ONCE during initialization
+        self.num_ap = len(config['ACCESS_POINTS'])
+        self.ap_data_info = {
+            'locations': grid_tools.get_ap_locations(config, self.num_ap, device),
+            'orientations': torch.tensor(
+                [data.get('ORIENTATION_DEG', 0) for data in config['ACCESS_POINTS'].values()], 
+                dtype=torch.float32, 
+                device=device
+            )
+        }
+
+    def estimate(self, signal_data: Dict[str, Any]) -> torch.Tensor:
         """
-        Executes the Physics-Aware pipeline:
-        1. Compute EPD (0.5s)
-        2. AI Inference (10s history -> 0.5s intent)
-        3. Viterbi Fusion (0.5s)
+        Executes the Physics-Aware pipeline
         """
-        # 1. Get current 0.5s features
-        current_features = signal_data['features'] 
+        # Extract Data
+        features = signal_data['features']
+        buffer = signal_data.get('buffer')
+        spd = signal_data.get('spd') 
         
-        # 2. Compute EPD (Physics Layer) - Only for current 0.5s
-        # Using the SPD from signal_data if needed for Dynamic Variance
-        spd = signal_data.get('spd')
-        epd = self.physics_layer.compute_epd(current_features, spd)
-        
-        # [CRITICAL STEP] Inject EPD back into dictionary
-        # This allows the Worker to send it to the Training Worker later
-        signal_data['epd'] = epd.detach().cpu() 
-
-        # 3. AI Inference (Transformer) - Uses 10s Buffer
-        ai_transition = None
-        buffer_list = signal_data.get('buffer')
-        
-        if self.transformer_model is not None and buffer_list:
-            # (A) Stack Buffer: List of Tensors -> (1, Time=10s, Dim)
-            input_seq = torch.cat(buffer_list, dim=1) 
-            
-            with torch.no_grad():
-                # (B) Full sequence inference
-                full_transition = self.transformer_model(input_seq)
-                
-                # (C) Slice: Take only the part corresponding to current 0.5s
-                T_curr = current_features.shape[1]
-                ai_transition = full_transition[:, -T_curr:, :]
-
-        # 4. Viterbi Fusion - Only for current 0.5s
-        # Note: You need to ensure you have a Viterbi implementation accessible here.
-        # Example call:
-        trajectory = self.physics_layer.run_viterbi_step(
-            epd, 
-            ai_transition, 
-            self.reference_grid,
-            self.directions_vectors
+        # Instantiate the Proposed Estimator
+        estimator = ProposedEstimator(
+            features=features,
+            buffer=buffer,
+            spd=spd,
+            config=self.config,
+            reference_grid=self.reference_grid,
+            ap_data=self.ap_data_info,
+            device=self.device,
+            model=self.transformer_model
         )
+
+        # Solve (Physics Layer -> AI Layer -> Viterbi Fusion)
+        trajectory = estimator.solve()
+
+        # Extract EPD for Training Worker
+        if hasattr(estimator, 'epd') and estimator.epd is not None:
+            signal_data['epd'] = estimator.epd.detach().cpu()
             
         return trajectory

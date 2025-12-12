@@ -540,97 +540,6 @@ def get_all_neighbor_indices(
     
     return neighbor_indices
 
-###########################################
-##### --- Emission Probability GT --- #####
-###########################################
-
-def calculate_emission_probability(
-        feature_matrix: torch.Tensor, 
-        reference_grid: torch.Tensor,
-        propagation_params: Dict[str, Any], 
-        ap_locations: torch.Tensor, 
-        ap_orientations: torch.Tensor, 
-        device: torch.device
-) -> torch.Tensor:
-    
-##### --- Extract Power, Angle, Delay observations (Q, T) ---
-    power_qt = feature_matrix[:, :, 0] 
-    angle_qt = feature_matrix[:, :, 1] 
-    delay_qt = feature_matrix[:, :, 2] 
-    
-    G = reference_grid.shape[0] # Number of grid points
-    Q, T = power_qt.shape       # Number of APs, Number of time steps
-    K = 2                       # Number of states (LOS/NLOS)
-    DEVICE = device
-    
-##### --- Parameter Preparation and Reshaping ---
-    # (Q, K) -> (1, Q, 1, K) for broadcasting
-    alpha_1q1k = propagation_params['alpha_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
-    beta_1q1k  = propagation_params['beta_qk'].to(DEVICE).unsqueeze(0).unsqueeze(2)
-    power_var_1q1k = propagation_params['power_qk_var'].to(DEVICE).unsqueeze(0).unsqueeze(2)
-
-    # (K) -> (1, 1, 1, K) for broadcasting
-    angle_var_111k = propagation_params['angle_k_var'].to(DEVICE).view(1, 1, 1, K)
-    delay_mean_111k = propagation_params['delay_k_mean'].to(DEVICE).view(1, 1, 1, K)
-    delay_var_111k = propagation_params['delay_k_var'].to(DEVICE).view(1, 1, 1, K)
-    
-##### --- Grid Distance (L_gq) and Angle Mean Calculation ---
-    # Calculate log10(Distance) for each grid point g to each AP q, shape (G, Q)
-    L_gq = grid_tools.calculate_L_gq(reference_grid, ap_locations).to(DEVICE)
-    # Reshape for broadcasting to (G, Q, 1, 1)
-    L_gq11 = L_gq.unsqueeze(2).unsqueeze(3)
-
-    # Calculate geometric angle mean for each grid point g to each AP q, shape (G, Q)
-    angle_gq_mean = grid_tools.calculate_angle_gq_mean(reference_grid, ap_locations, ap_orientations).to(DEVICE)
-    # Reshape for broadcasting to (G, Q, 1, 1)
-    angle_gq11_mean = angle_gq_mean.unsqueeze(2).unsqueeze(3)
-    
-##### --- Feature Mean and Variance Calculation (Broadcasted) ---
-    
-    # --- Power ---
-    # Power Mean (G, Q, 1, K) = beta_qk - (alpha_qk * log10(L_gq)) (Log-distance model)
-    power_gq1k_mean = beta_1q1k - (alpha_1q1k * L_gq11) 
-    # Power Mean (G, Q, T, K) - Expand over T dimension
-    power_gqtk_mean = power_gq1k_mean.expand(G, Q, T, K) 
-    # Power Var (G, Q, T, K) - Expand over T dimension
-    power_gqtk_var = power_var_1q1k.expand(G, Q, T, K)
-
-    # --- Angle ---
-    # Angle Mean (G, Q, T, K) - Expand over T and K dimensions
-    angle_gqtk_mean = angle_gq11_mean.expand(G, Q, T, K)
-    # Angle Var (G, Q, T, K) - Expand over G, Q, T dimensions
-    angle_gqtk_var = angle_var_111k.expand(G, Q, T, K)
-
-    # --- Delay ---
-    # Delay Mean (G, Q, T, K) - Expand over G, Q, T dimensions
-    delay_gqtk_mean = delay_mean_111k.expand(G, Q, T, K)
-    # Delay Var (G, Q, T, K) - Expand over G, Q, T dimensions
-    delay_gqtk_var = delay_var_111k.expand(G, Q, T, K)
-
-##### --- Reshape Observations for Broadcasting ---
-    # Observations (Q, T) -> (1, Q, T, 1) -> (G, Q, T, K)
-    power_gqtk = power_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
-    angle_gqtk = angle_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
-    delay_gqtk = delay_qt.unsqueeze(0).unsqueeze(3).expand(G, Q, T, K)
-    
-##### --- Calculate Log PDF for each feature (G, Q, T, K) ---
-    log_P_power_gqtk = gaussian_log_pdf(power_gqtk, power_gqtk_mean, power_gqtk_var)
-    log_P_angle_gqtk = gaussian_log_pdf(angle_gqtk, angle_gqtk_mean, angle_gqtk_var)
-    log_P_delay_gqtk = gaussian_log_pdf(delay_gqtk, delay_gqtk_mean, delay_gqtk_var)
-
-##### --- Incorporate Global LOS Prior pi_k ---
-    # (K) -> (1, 1, 1, K) -> (G, Q, T, K)
-    pi_k = propagation_params['pi_k'].to(DEVICE)
-    log_pi_k_111k = torch.log(pi_k.clamp(min=1e-10)).view(1, 1, 1, K)
-    log_pi_k_gqtk = log_pi_k_111k.expand(G, Q, T, K)
-
-##### --- Emission Probability ---
-    log_joint_prob_gqtk = log_pi_k_gqtk + log_P_power_gqtk + log_P_angle_gqtk + log_P_delay_gqtk
-    log_joint_prob_gqt = torch.logsumexp(log_joint_prob_gqtk, dim=3)
-    emission_log_prob_gt = log_joint_prob_gqt.sum(dim=1)
-
-    return emission_log_prob_gt
-
 def calculate_angle_gq_mean(
         reference_grid: torch.Tensor, # Shape [G, 2]
         ap_locations: torch.Tensor, 
@@ -687,27 +596,14 @@ def gaussian_log_pdf(
 ###### --- Viterbi Updating step --- ######
 ###########################################
 
-def get_winner_neighbor_info( 
+def get_max_previous_score( 
     G_neighbor_index_matrix: torch.Tensor, 
     delta: torch.Tensor, 
-    history_coords: Optional[torch.Tensor], 
-    model: Optional[torch.nn.Module], 
-    mode: str, 
-    SOS_TOKEN: int
+    t: int, 
+    **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     
     G = delta.shape[0]
-
-##### --- Transition Log Probability Using Transformer ---
-    # Transformer predictions are computed only if needed
-    if model is not None and mode == 'TRANSFORMER':
-        with torch.no_grad():
-            transition_log_prob_G_9 = transformer_batch_predict_logits(
-                model, 
-                history_coords, 
-                SOS_TOKEN, 
-                device=delta.device
-            )
 
 ##### --- Find Maximum Value and Index for each Point ---
     valid_mask = G_neighbor_index_matrix != -1
@@ -720,19 +616,12 @@ def get_winner_neighbor_info(
 
     # Iterate over 9 neighbor directions
     for neighbor_pos in range(9):
-        opposite_neighbor_pos = utils.opposite(neighbor_pos)
         neighbor_indices = G_neighbor_index_matrix[:, neighbor_pos]
         mask = valid_mask[:, neighbor_pos]
 
         if mask.any():
             gathered_deltas = delta_prev[neighbor_indices[mask]]
-
-            if mode == 'MARKOV':
-                score_g_9[mask, neighbor_pos] = gathered_deltas
-                
-            elif mode == 'TRANSFORMER':
-                gather_transition = transition_log_prob_G_9[neighbor_indices[mask], opposite_neighbor_pos]
-                score_g_9[mask, neighbor_pos] = gathered_deltas + gather_transition
+            score_g_9[mask, neighbor_pos] = gathered_deltas
 
     # Find Max (Value) and Argmax (Source Neighbor) for each Reference Point
     max_value, G_winner_neighbor_relative_position = torch.max(score_g_9, dim=1)

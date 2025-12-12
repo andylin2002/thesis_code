@@ -19,13 +19,13 @@ class BaselineAnalysisStrategy(ISignalProcessor):
         Input: [Q, T, N, M]
         Output: Features [Q, T, 3] (Power, Angle, Delay)
         """
-        feature_matrix = self.processor.process(
+        features = self.processor.process(
             raw_csi_data=raw_csi_block
         )
         
         return {
             'mode': 'BASELINE',
-            'features': feature_matrix
+            'features': features
         }
 
 class ProposedAnalysisStrategy(ISignalProcessor):
@@ -44,7 +44,7 @@ class ProposedAnalysisStrategy(ISignalProcessor):
         Output: Features [Q, T, 4], SPD [Q, T, N, N]
         """
         # 1. Extract MMP features (AoA, ToF, AS, DS) -> [Q, T, 4]
-        feature_matrix = self.processor.process(
+        features = self.processor.process(
             raw_csi_data=raw_csi_block
         )
         
@@ -53,7 +53,7 @@ class ProposedAnalysisStrategy(ISignalProcessor):
         
         return {
             'mode': 'PROPOSED',
-            'features': feature_matrix,
+            'features': features,
             'spd': spd
         }
 

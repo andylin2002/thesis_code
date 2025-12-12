@@ -5,7 +5,7 @@ import torch
 
 # Import common utilities
 from .._common.preprocessing import run_data_processor
-from .._common.extraction.mmp_core import MMP_Algorithm
+from .._common.extraction.mmp import MMP_Algorithm
 from .._common.extraction import power_extractor, delay_estimator
 
 class BaselineProcessor:
@@ -61,22 +61,22 @@ class BaselineProcessor:
             delay_flat
         ], dim=1)
 
-        feature_matrix = features_stacked_flat.reshape(self.num_ap, self.num_sample, 3)
+        features = features_stacked_flat.reshape(self.num_ap, self.num_sample, 3)
 
         DEBUG = True
         if DEBUG:
-            self._save_debug_info(feature_matrix)
+            self._save_debug_info(features)
 
-        return feature_matrix
+        return features
 
-    def _save_debug_info(self, feature_matrix):
+    def _save_debug_info(self, features):
         """Helper function to save debug info."""
         try:
-            feature_matrix_np = feature_matrix.detach().cpu().numpy()
-            save_path = "output/csi_feature_matrix.npy"
+            features_np = features.detach().cpu().numpy()
+            save_path = "output/csi_features.npy"
             os.makedirs("output", exist_ok=True) # Ensure directory exists
-            np.save(save_path, feature_matrix_np)
+            np.save(save_path, features_np)
             print(f"[BaselineProcessor] Feature matrix saved to: {os.path.abspath(save_path)}")
-            print(f"[BaselineProcessor] Shape: {feature_matrix_np.shape} (Expect: Q x T x 3)")
+            print(f"[BaselineProcessor] Shape: {features_np.shape} (Expect: Q x T x 3)")
         except Exception as e:
             print(f"[Error] Failed to save feature matrix: {e}")

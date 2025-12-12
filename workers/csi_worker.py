@@ -72,7 +72,7 @@ class CSI_Worker(BaseWorker):
                     self._update_model(new_model_config)
 
                 # Strategy Execution: Signal Processing
-                # Returns dict with 'mode', 'features', 'spd', or 'rssi'
+                # Returns dict with 'mode', 'features', ('spd')
                 processed_data = self.signal_processor.extract(raw_csi_block)
 
                 if 'features' in processed_data:
