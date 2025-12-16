@@ -99,7 +99,7 @@ class ProposedProcessor:
             save_path = "output/csi_features.npy"
             os.makedirs("output", exist_ok=True) # Ensure directory exists
             np.save(save_path, features_np)
-            print(f"[BaselineProcessor] Feature matrix saved to: {os.path.abspath(save_path)}")
-            print(f"[BaselineProcessor] Shape: {features_np.shape} (Expect: Q x T x 3)")
+            print(f"[ProposedProcessor] Feature matrix saved to: {os.path.abspath(save_path)}")
+            print(f"[ProposedProcessor] Shape: {features_np.shape} (Expect: Q x T x 4)")
         except Exception as e:
             print(f"[Error] Failed to save feature matrix: {e}")

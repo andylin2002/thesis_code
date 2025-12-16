@@ -6,7 +6,6 @@ from .hard_em import HardEM_Algorithm
 from . import hard_em_utils
 from .._common.viterbi import Viterbi_Algorithm
 from .._common import grid_tools
-from .._common import math_tools
 
 class BaselineEstimator:
     """
@@ -61,7 +60,7 @@ class BaselineEstimator:
         # 2. Initialize trajectory (Warm-up)
         current_params = self.param_optimizer.propagation_params
         
-        emission_probs = math_tools.calculate_emission_probability(
+        emission_probs = hard_em_utils.calculate_emission_probability(
             self.features,
             self.reference_grid,
             current_params,
@@ -88,7 +87,7 @@ class BaselineEstimator:
             current_params = self.param_optimizer.propagation_params
             
             # 2. Calculate Emission Probabilities
-            emission_probs = math_tools.calculate_emission_probability(
+            emission_probs = hard_em_utils.calculate_emission_probability(
                 self.features,
                 self.reference_grid,
                 current_params,

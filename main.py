@@ -10,19 +10,19 @@ from queue import Empty
 # Import Utility
 import utils
 
-# Import New Workers
+# Import Workers
 from workers.csi_worker import CSI_Worker
 from workers.tfm_worker import TFM_Worker
 
-# Configuration Paths
+# Configuration
 CONFIG_PATH = 'config.yaml'
 CHECKPOINT_DIR = 'checkpoint'
 DATASET_ROOT = 'dataset'
-# Set Device
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def main():
-    # 1. Setup Multiprocessing (Spawn method required for CUDA)
+    # 1. Setup Multiprocessing
+    # 'spawn' is required for CUDA compatibility
     try:
         if torch.cuda.is_available():
             set_start_method('spawn', force=True)
@@ -40,19 +40,18 @@ def main():
     # 3. Load Configuration
     config = utils.load_yaml_config(CONFIG_PATH)
     if not config:
-        print("[System] Configuration loading failed.")
+        print("[System] Config loading failed.")
         return
     
     # Load Environment Config
     dataset_folder = os.path.join(DATASET_ROOT, config['DATASET_FOLDER'])
-    env_config_path = os.path.join(dataset_folder, config['ENV_CONFIG'])
-    env_config = utils.load_yaml_config(env_config_path)
+    env_config = utils.load_yaml_config(os.path.join(dataset_folder, config['ENV_CONFIG']))
     if not env_config:
-        print("[System] Environment config loading failed.")
+        print("[System] Env config loading failed.")
         return
     config.update(env_config)
-
-    # Update Config with Args
+    
+    # Override with Args
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
     
@@ -72,23 +71,23 @@ def main():
         print(f"[System] Failed to load directions.mat: {e}")
         return
 
-    # Prepare Checkpoint Path
+    # Prepare Checkpoint
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     scene_name = config.get('SCENARIO_NAME', 'Untitled_Scene')
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"{scene_name}.ckpt")
 
     # 5. Setup IPC Queues
+    # 'data': JoinableQueue allows .join() to wait for task completion
     queues = {
-        'data': JoinableQueue(), # Input: Raw CSI
-        'result': Queue(),       # Output: Trajectory
-        'model': Queue()         # Update: Model Weights
+        'data': JoinableQueue(), 
+        'result': Queue(),       
+        'model': Queue()         
     }
     stop_event = Event()
 
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
-    # CSI Worker (Inference)
     csi_worker = CSI_Worker(
         name="CSI_Worker",
         config=config,
@@ -98,7 +97,6 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    # AI Worker (Training)
     tfm_worker = TFM_Worker(
         name="TFM_Worker",
         config=config,
@@ -112,9 +110,9 @@ def main():
     csi_worker.start()
     tfm_worker.start()
 
-    # 8. Data Injection & Collection Loop
+    # 8. Main Loop
     hmatrix_list = config.get('HMATRIX_LIST', [])
-    all_trajectories = [] # Buffer to store results
+    all_trajectories = [] 
 
     try:
         loop_mode = config.get('LOOP', False)
@@ -137,16 +135,17 @@ def main():
                 
                 for block in csi_blocks:
                     # A. Inject Data
-                    queues['data'].put(block)
+                    # Important: Send CPU tensor to avoid CUDA IPC locks
+                    queues['data'].put(block.cpu())
                     
-                    # B. Collect Results (Non-blocking check)
+                    # B. Collect Results (Dynamic Flush)
+                    # Non-blocking check to prevent queue overflow
                     while not queues['result'].empty():
                         try:
                             res = queues['result'].get_nowait()
                             
-                            # Parse result (Handle Dict from Proposed or Tensor from Baseline)
+                            # Extract path from dict or tensor
                             traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
-                            
                             if isinstance(traj, torch.Tensor):
                                 traj = traj.detach().cpu().numpy()
                             
@@ -159,20 +158,34 @@ def main():
             if not loop_mode:
                 break
         
-        # Flush remaining results after injection is done
-        print("[System] Waiting for remaining results...")
-        time_waited = 0
-        while time_waited < 5.0: # 5 seconds timeout
-            if not queues['result'].empty():
-                res = queues['result'].get()
+        # =========================================================
+        # Synchronization: Wait for all tasks to complete
+        # =========================================================
+        print("[System] Data injection complete. Waiting for workers (JOIN)...")
+        
+        # Blocks main process until Worker calls task_done() for all items
+        queues['data'].join()
+        
+        print("[System] All tasks processed. Flushing final results...")
+
+        # Collect remaining results
+        while True:
+            try:
+                res = queues['result'].get(timeout=2.0) 
+                
                 traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
                 if isinstance(traj, torch.Tensor):
                     traj = traj.detach().cpu().numpy()
+                
                 all_trajectories.append(traj)
-                time_waited = 0 # Reset timeout if data received
-            else:
-                time.sleep(0.1)
-                time_waited += 0.1
+                print(f"[System] Collected batch. Total length: {len(all_trajectories)}")
+            
+            except Empty:
+                print("[System] Queue is empty. Flush complete.")
+                break
+            except Exception as e:
+                print(f"[System] Final Flush error: {e}")
+                break
 
         # Save Final Trajectory
         if all_trajectories:
@@ -189,6 +202,7 @@ def main():
     
     finally:
         # 9. Graceful Shutdown
+        print("[System] Shutting down workers...")
         stop_event.set()
         
         tfm_worker.join(timeout=2)

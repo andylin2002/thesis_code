@@ -7,7 +7,6 @@ from .soft_em import SoftEM_Algorithm
 from . import soft_em_utils
 from .._common.viterbi import Viterbi_Algorithm
 from .._common import grid_tools
-from .._common import math_tools
 
 class ProposedEstimator:
     """
@@ -59,7 +58,7 @@ class ProposedEstimator:
 
         # State tracking
         self.trajectory = None
-        self.epd = None  # Store EPD for Training Worker
+        self.epd = None
 
     def solve(self) -> torch.Tensor:
         """
@@ -70,35 +69,18 @@ class ProposedEstimator:
         # --- Initialization ---
         self.param_optimizer.initialize_params()
         
-        # SoftEM will optimize parameters based on features (and this init path if needed)
-        initial_trajectory = torch.zeros((self.num_sample, 2), device=self.device)
-        
         # --- Step 1: Physics Parameter Optimization (SoftEM) ---
         # This function runs the internal EM loop until parameters converge.
-        # We do NOT loop this with Viterbi.
-        _ = self.param_optimizer.step_parameters(initial_trajectory)
+        # Process: Init -> [Calc EPD -> Calc Gamma -> Update Params] * N -> Converged Parameters
+        self.param_optimizer.step_parameters()
         
-        # --- Step 2: Calculate EPD (Emission) ---
-        # Retrieve the optimized parameters
-        current_params = self.param_optimizer.propagation_params
-        
-        # Calculate Soft Emission Probabilities (EPD)
-        emission_probs = math_tools.calculate_emission_probability(
-            self.features,
-            self.reference_grid,
-            current_params,
-            self.ap_data['locations'],
-            self.ap_data['orientations'],
-            self.device
-        )
-        
-        # [CRITICAL] Save EPD for external access (Training Worker)
-        self.epd = emission_probs
+        # --- Step 2: Retrieve the Calculated EPD ---
+        self.epd = self.param_optimizer.get_final_epd()
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler
         self.trajectory, _ = self.viterbi.run(
-            emission_log_probs=emission_probs,
+            emission_log_probs=self.epd,
             neighbor_index_matrix=self.neighbor_matrix,
             get_max_previous_score=soft_em_utils.get_max_previous_score,
             
@@ -108,5 +90,27 @@ class ProposedEstimator:
             spd=self.spd,
             mode='TRANSFORMER'
         )
+
+        # =========================================================
+        # 💾 [SAVE FOR DEBUG]
+        # =========================================================
+        import os
+        import numpy as np
+        
+        debug_dir = "output/debug"
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # 1. save EPD
+        np.save(os.path.join(debug_dir, "epd.npy"), self.epd.detach().cpu().numpy())
+        
+        # 2. save Grid
+        np.save(os.path.join(debug_dir, "grid.npy"), self.reference_grid.detach().cpu().numpy())
+        
+        # 3. save SoftEM params
+        params_numpy = {k: v.detach().cpu().numpy() for k, v in self.param_optimizer.propagation_params.items()}
+        np.save(os.path.join(debug_dir, "softem_params.npy"), params_numpy)
+
+        print(f"[Estimator] Debug data saved to {debug_dir}")
+        # =========================================================
         
         return self.trajectory

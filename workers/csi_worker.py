@@ -66,6 +66,9 @@ class CSI_Worker(BaseWorker):
                 continue
             
             try:
+                # Move to GPU for Processing
+                raw_csi_block = raw_csi_block.to(self.device)
+
                 # Check for Model Updates (Hot-Swapping)
                 if not model_queue.empty():
                     new_model_config = model_queue.get()
@@ -90,11 +93,15 @@ class CSI_Worker(BaseWorker):
                         'input': processed_data, # Features, SPD, EPD
                         'pseudo_gt': trajectory  # Path from Viterbi
                     }
-                    out_queue.put(training_pkg)
+                    training_pkg_cpu = self._recursive_detach_cpu(training_pkg)
+                    out_queue.put(training_pkg_cpu)
+                    print(f"[{self.name}] Result SENT to queue.")
                 else:
                     # For Baseline, just output the path (or handle differently)
                     # Here we wrap it to match the queue expectation if needed
-                    out_queue.put(trajectory)
+                    trajectory_cpu = self._recursive_detach_cpu(trajectory)
+                    out_queue.put(trajectory_cpu)
+                    print(f"[{self.name}] Result SENT to queue.")
 
                 in_queue.task_done()
 
@@ -140,3 +147,19 @@ class CSI_Worker(BaseWorker):
             
         except Exception as e:
             print(f"[{self.name}] Failed to update model: {e}")
+
+    def _recursive_detach_cpu(self, data):
+        """
+        Helper: Recursively move Tensors in dict/list/tuple to CPU.
+        Removes GPU dependency for IPC safety.
+        """
+        if isinstance(data, torch.Tensor):
+            return data.detach().cpu()
+        elif isinstance(data, dict):
+            return {k: self._recursive_detach_cpu(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._recursive_detach_cpu(v) for v in data]
+        elif isinstance(data, tuple):
+            return tuple(self._recursive_detach_cpu(v) for v in data)
+        else:
+            return data
