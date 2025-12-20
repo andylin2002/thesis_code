@@ -55,9 +55,9 @@ class CSI_Worker(BaseWorker):
         """
         Main inference loop.
         """
-        in_queue = self.queues['data']   # Raw CSI input
-        out_queue = self.queues['result'] # Output to AI Worker / UI
-        model_queue = self.queues['model']    # Receive updated AI model
+        in_queue = self.queues['data']      # Raw CSI input
+        out_queue = self.queues['result']   # Output to AI Worker / UI
+        model_queue = self.queues['model']  # Receive updated AI model
 
         while not self.stop_event.is_set():
             try:
@@ -79,8 +79,8 @@ class CSI_Worker(BaseWorker):
                 processed_data = self.signal_processor.extract(raw_csi_block)
 
                 if 'features' in processed_data:
-                        self.history_buffer.append(processed_data['features'])
-                        processed_data['buffer'] = list(self.history_buffer)
+                    self.history_buffer.append(processed_data['features'])
+                    processed_data['buffer'] = list(self.history_buffer)
 
                 # Strategy Execution: Location Estimation
                 # Returns Tensor/np.array of the predicted path
@@ -95,13 +95,11 @@ class CSI_Worker(BaseWorker):
                     }
                     training_pkg_cpu = self._recursive_detach_cpu(training_pkg)
                     out_queue.put(training_pkg_cpu)
-                    print(f"[{self.name}] Result SENT to queue.")
                 else:
                     # For Baseline, just output the path (or handle differently)
                     # Here we wrap it to match the queue expectation if needed
                     trajectory_cpu = self._recursive_detach_cpu(trajectory)
                     out_queue.put(trajectory_cpu)
-                    print(f"[{self.name}] Result SENT to queue.")
 
                 in_queue.task_done()
 

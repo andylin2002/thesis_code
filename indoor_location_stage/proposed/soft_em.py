@@ -112,7 +112,6 @@ class SoftEM_Algorithm:
             
             # 4. Check Convergence
             if self._check_parameter_convergence(old_params, new_params):
-                # Optional: print(f"[SoftEM] Converged at iter {i+1}")
                 break
 
     def _check_parameter_convergence(

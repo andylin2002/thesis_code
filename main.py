@@ -7,10 +7,8 @@ import numpy as np
 from multiprocessing import JoinableQueue, Queue, Event, set_start_method
 from queue import Empty
 
-# Import Utility
 import utils
 
-# Import Workers
 from workers.csi_worker import CSI_Worker
 from workers.tfm_worker import TFM_Worker
 

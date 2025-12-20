@@ -8,6 +8,8 @@ from . import soft_em_utils
 from .._common.viterbi import Viterbi_Algorithm
 from .._common import grid_tools
 
+from scipy.signal import savgol_filter
+
 class ProposedEstimator:
     """
     Controller for the Proposed Method (Physics-Aware AI).
@@ -73,13 +75,15 @@ class ProposedEstimator:
         # This function runs the internal EM loop until parameters converge.
         # Process: Init -> [Calc EPD -> Calc Gamma -> Update Params] * N -> Converged Parameters
         self.param_optimizer.step_parameters()
+
+        print(self.param_optimizer.propagation_params)
         
         # --- Step 2: Retrieve the Calculated EPD ---
         self.epd = self.param_optimizer.get_final_epd()
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler
-        self.trajectory, _ = self.viterbi.run(
+        raw_trajectory, _ = self.viterbi.run(
             emission_log_probs=self.epd,
             neighbor_index_matrix=self.neighbor_matrix,
             get_max_previous_score=soft_em_utils.get_max_previous_score,
@@ -91,8 +95,11 @@ class ProposedEstimator:
             mode='TRANSFORMER'
         )
 
+        self.trajectory = self._apply_physics_smoothing(raw_trajectory)
+        print(self.trajectory)
+
         # =========================================================
-        # 💾 [SAVE FOR DEBUG]
+        # [SAVE FOR ANALYSIS]
         # =========================================================
         import os
         import numpy as np
@@ -114,3 +121,35 @@ class ProposedEstimator:
         # =========================================================
         
         return self.trajectory
+    
+    # DEBUG
+    def _apply_physics_smoothing(self, raw_coords: torch.Tensor) -> torch.Tensor:
+        """
+        Apply Savitzky-Golay filter to smooth the trajectory, enforcing inertia.
+        Input: raw_coords (Tensor [T, 2]) on GPU
+        Output: smooth_coords (Tensor [T, 2]) on GPU
+        """
+        # 1. Convert to CPU Numpy
+        coords_np = raw_coords.detach().cpu().numpy()
+        T = coords_np.shape[0]
+
+        # 2. Parameters (根據您的採樣率調整)
+        # 假設 T=100 (1秒)，window設 11~31 是合理的
+        # window_length 必須是奇數，且小於 T
+        window_length = 11
+        polyorder = 2
+
+        if T <= window_length:
+            return raw_coords
+
+        try:
+            # 3. Apply Filter
+            smooth_np = savgol_filter(coords_np, window_length, polyorder, axis=0)
+            
+            # 4. Convert back to Tensor
+            smooth_coords = torch.from_numpy(smooth_np).to(raw_coords.device).type(raw_coords.dtype)
+            return smooth_coords
+
+        except Exception as e:
+            print(f"[Warning] Smoothing failed: {e}. Using raw trajectory.")
+            return raw_coords

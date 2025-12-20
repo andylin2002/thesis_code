@@ -48,36 +48,57 @@ class ProposedAnalysisStrategy(ISignalProcessor):
             raw_csi_data=raw_csi_block
         )
         
-        # 2. Compute SPD Matrix -> [Q, T, N, N]
-        spd = self._compute_spd(raw_csi_block)
+        # 2. Compute SNR -> [Q, T, N, N]
+        snr = self._compute_snr_from_covariance(raw_csi_block)
         
         return {
             'mode': 'PROPOSED',
             'features': features,
-            'spd': spd
+            'snr': snr
         }
 
-    def _compute_spd(self, raw_csi):
+    def _compute_snr_from_covariance(self, raw_csi: torch.Tensor) -> torch.Tensor:
         """
-        Computes Spatial Covariance Matrix R = H * H^H.
-        Input: [Q, T, N, M] (APs, Time, Antennas, Subcarriers)
-        Output: [Q, T, N, N]
-        """
-        # PyTorch matmul operates on the last two dims.
-        # We want (N, M) @ (M, N) -> (N, N).
+        Computes SNR via Eigenvalue Decomposition (EVD).
+        SNR = Max_Eigenvalue (Signal) / Min_Eigenvalue (Noise).
         
-        # 1. Conjugate Transpose of the last two dims: (N, M) -> (M, N)
+        Input: [Q, T, N, M]
+        Output: [Q, T] (dB)
+        """
+        # --- 1. Compute Spatial Covariance Matrix R ---
+        
+        # Conjugate Transpose: (N, M) -> (M, N)
         if raw_csi.is_complex():
             raw_csi_H = raw_csi.conj().transpose(-1, -2)
         else:
             raw_csi_H = raw_csi.transpose(-1, -2)
             
-        # 2. Matrix Multiplication: H * H^H
-        # [..., N, M] @ [..., M, N] = [..., N, N]
+        # Matrix Mult: [..., N, M] @ [..., M, N] = [..., N, N]
         R = torch.matmul(raw_csi, raw_csi_H)
         
-        # 3. Normalize by number of subcarriers (M)
+        # Normalize by num subcarriers (M)
         M = raw_csi.shape[-1]
         R = R / M
+
+        # --- 2. Eigenvalue Decomposition ---
         
-        return R
+        # Use eigvalsh for Hermitian matrices (faster/stable)
+        # Returns eigenvalues in ascending order
+        eigvals = torch.linalg.eigvalsh(R)
+        
+        # --- 3. Calculate SNR ---
+        
+        # Max Eigenvalue = Signal Power + Noise Power
+        signal_power = eigvals[..., -1] 
+        
+        # Min Eigenvalue = Noise Floor
+        # Add epsilon to avoid division by zero
+        noise_power = eigvals[..., 0] + 1e-9
+        
+        # Linear SNR
+        snr_linear = signal_power / noise_power
+        
+        # Convert to dB
+        snr_db = 10 * torch.log10(snr_linear)
+        
+        return snr_db
