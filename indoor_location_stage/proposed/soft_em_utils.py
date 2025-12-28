@@ -134,7 +134,7 @@ def calculate_emission_log_probs(
 
     # Clamp for stability
     var_aoa = torch.clamp(var_aoa, min=1e-6)
-    var_tof = torch.clamp(var_tof, min=1e-6)
+    var_tof = torch.clamp(var_tof, min=1e-18)
 
     # Reshape for Broadcasting: [Q, T, C] -> [Q, 1, T, C]
     var_aoa = var_aoa.unsqueeze(1)
