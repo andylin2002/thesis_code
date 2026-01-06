@@ -1,4 +1,4 @@
-# csi_analysis_stage/data_processor/packeting.py
+# csi_analysis_stage/_common/preprocessing/packeting.py
 
 import torch
 from typing import Dict, Any, Optional

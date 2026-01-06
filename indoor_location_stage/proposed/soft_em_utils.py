@@ -1,3 +1,5 @@
+# indoor_location_stage/proposed/soft_em_utils.py
+
 import torch
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, Optional, List
@@ -166,10 +168,7 @@ def calculate_emission_log_probs(
     # (Broadcasting handles Q, G, T, C alignment automatically)
     log_prob_aoa = _gaussian_log_pdf_angular(aoa_x, mean_aoa, var_aoa)
     log_prob_tof = _gaussian_log_pdf_linear(tof_x, mean_tof, var_tof)
-
-    # Add Mixture Weights: log(P) + log(w)
-    # log_weights: [Q, T, C] -> [Q, 1, T, C]
-    total_log_prob_k = log_prob_aoa + log_prob_tof + log_weights.unsqueeze(1)
+    total_log_prob_k = log_prob_aoa + log_prob_tof# + log_weights.unsqueeze(1)
 
     # =========================================================
     # Step 5: Integration (LogSumExp)
@@ -179,7 +178,7 @@ def calculate_emission_log_probs(
 
     # 2. Integrate APs (dim=0): Sum log probs -> [G, T]
     emission_log_probs_gt = torch.sum(mixed_log_prob, dim=0)
-    
+
     return emission_log_probs_gt
 
 def _gaussian_log_pdf_angular(x, mean, var):

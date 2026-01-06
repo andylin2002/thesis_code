@@ -1,3 +1,5 @@
+# indoor_location_stage/proposed/estimator.py
+
 import torch
 import numpy as np
 from typing import Dict, Any, List, Optional
@@ -96,7 +98,6 @@ class ProposedEstimator:
         )
 
         self.trajectory = self._apply_physics_smoothing(raw_trajectory)
-        print(self.trajectory)
 
         # =========================================================
         # [SAVE FOR ANALYSIS]

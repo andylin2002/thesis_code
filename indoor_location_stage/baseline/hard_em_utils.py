@@ -1,3 +1,5 @@
+# indoor_location_stage/baseline/hard_em_utils.py
+
 import torch
 from typing import Dict, Any, Optional
 from torch.distributions import Normal

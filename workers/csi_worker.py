@@ -1,3 +1,5 @@
+# workers/csi_worker.py
+
 import torch
 import numpy as np
 from collections import deque
@@ -58,6 +60,7 @@ class CSI_Worker(BaseWorker):
         in_queue = self.queues['data']      # Raw CSI input
         out_queue = self.queues['result']   # Output to AI Worker / UI
         model_queue = self.queues['model']  # Receive updated AI model
+        save_queue = self.queues['save']    # To Main Process (Saving/Plotting)
 
         while not self.stop_event.is_set():
             try:
@@ -95,11 +98,13 @@ class CSI_Worker(BaseWorker):
                     }
                     training_pkg_cpu = self._recursive_detach_cpu(training_pkg)
                     out_queue.put(training_pkg_cpu)
+                    save_queue.put(training_pkg_cpu['pseudo_gt'])
                 else:
                     # For Baseline, just output the path (or handle differently)
                     # Here we wrap it to match the queue expectation if needed
                     trajectory_cpu = self._recursive_detach_cpu(trajectory)
                     out_queue.put(trajectory_cpu)
+                    save_queue.put(trajectory_cpu)
 
                 in_queue.task_done()
 

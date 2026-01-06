@@ -1,3 +1,5 @@
+# indoor_location_stage/_common/grid_tools.py
+
 import torch
 import numpy as np
 from typing import Dict, Any

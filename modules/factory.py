@@ -1,3 +1,5 @@
+# modules/factory.py
+
 import torch
 from strategies.analysis_strategy import BaselineAnalysisStrategy, ProposedAnalysisStrategy
 from strategies.location_strategy import BaselineLocationStrategy, ProposedLocationStrategy

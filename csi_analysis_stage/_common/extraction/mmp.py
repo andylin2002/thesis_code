@@ -1,4 +1,4 @@
-# csi_analysis_stage/feature_extractor/mmp_core.py
+# csi_analysis_stage/_common/extraction/mmp.py
 
 import torch
 from typing import Dict, Any, Tuple

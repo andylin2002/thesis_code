@@ -1,3 +1,5 @@
+# core/interfaces.py
+
 import torch
 from abc import ABC, abstractmethod
 from multiprocessing import Process, Event, Queue

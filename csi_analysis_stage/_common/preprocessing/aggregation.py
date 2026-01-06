@@ -1,4 +1,4 @@
-# csi_analysis_stage/data_processor/aggregation.py
+# csi_analysis_stage/_common/preprocessing/aggregation.py
 
 import torch
 from typing import Optional

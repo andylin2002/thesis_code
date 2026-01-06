@@ -79,7 +79,8 @@ def main():
     queues = {
         'data': JoinableQueue(), 
         'result': Queue(),       
-        'model': Queue()         
+        'model': Queue(), 
+        'save': Queue()
     }
     stop_event = Event()
 
@@ -112,6 +113,7 @@ def main():
     hmatrix_list = config.get('HMATRIX_LIST', [])
     all_trajectories = [] 
 
+    total_batches_sent = 0
     try:
         loop_mode = config.get('LOOP', False)
         while True:
@@ -129,29 +131,14 @@ def main():
                     print("[System] No data loaded.")
                     break
 
-                print(f"\n[System] Injecting {len(csi_blocks)} CSI blocks...")
+                # Update counter
+                total_batches_sent += len(csi_blocks)
+                print(f"\n[System] Injecting {len(csi_blocks)} blocks. Total sent: {total_batches_sent}")
                 
                 for block in csi_blocks:
-                    # A. Inject Data
+                    # Inject Data
                     # Important: Send CPU tensor to avoid CUDA IPC locks
                     queues['data'].put(block.cpu())
-                    
-                    # B. Collect Results (Dynamic Flush)
-                    # Non-blocking check to prevent queue overflow
-                    while not queues['result'].empty():
-                        try:
-                            res = queues['result'].get_nowait()
-                            
-                            # Extract path from dict or tensor
-                            traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
-                            if isinstance(traj, torch.Tensor):
-                                traj = traj.detach().cpu().numpy()
-                            
-                            all_trajectories.append(traj)
-                        except Empty:
-                            break
-                        except Exception as e:
-                            print(f"[System] Collection error: {e}")
 
             if not loop_mode:
                 break
@@ -159,41 +146,32 @@ def main():
         # =========================================================
         # Synchronization: Wait for all tasks to complete
         # =========================================================
-        print("[System] Data injection complete. Waiting for workers (JOIN)...")
+        print(f"[System] Injection done. Waiting for {total_batches_sent} batches...")
         
-        # Blocks main process until Worker calls task_done() for all items
-        queues['data'].join()
-        
-        print("[System] All tasks processed. Flushing final results...")
-
-        # Collect remaining results
-        while True:
+        # Loop until we receive exactly the number of batches sent
+        while len(all_trajectories) < total_batches_sent:
             try:
-                res = queues['result'].get(timeout=2.0) 
+                # Listen to 'save' queue. TFM worker listens to 'result'.
+                res_path = queues['save'].get(timeout=None) 
                 
-                traj = res['pseudo_gt'] if isinstance(res, dict) and 'pseudo_gt' in res else res
-                if isinstance(traj, torch.Tensor):
-                    traj = traj.detach().cpu().numpy()
+                # Convert to Numpy
+                if hasattr(res_path, 'detach'):
+                    res_path = res_path.detach().cpu().numpy()
                 
-                all_trajectories.append(traj)
-                print(f"[System] Collected batch. Total length: {len(all_trajectories)}")
+                all_trajectories.append(res_path)
+                
+                # Instant Save (Overwrite .npy)
+                full_path = np.concatenate(all_trajectories, axis=0)
+                os.makedirs("output", exist_ok=True)
+                np.save("output/predicted_trajectory.npy", full_path)
+                
+                print(f"\r[System] Progress: {len(all_trajectories)}/{total_batches_sent} saved.", end="")
             
-            except Empty:
-                print("[System] Queue is empty. Flush complete.")
-                break
             except Exception as e:
-                print(f"[System] Final Flush error: {e}")
+                print(f"\n[System] Collection Error: {e}")
                 break
 
-        # Save Final Trajectory
-        if all_trajectories:
-            full_path = np.concatenate(all_trajectories, axis=0)
-            os.makedirs("output", exist_ok=True)
-            save_path = os.path.join("output", "predicted_trajectory.npy")
-            np.save(save_path, full_path)
-            print(f"[System] Trajectory saved to: {save_path} (Shape: {full_path.shape})")
-        else:
-            print("[System] No trajectory data collected.")
+        print("\n[System] All tasks processed.")
 
     except KeyboardInterrupt:
         print("\n[System] Stopping...")
