@@ -24,8 +24,6 @@ class ProposedProcessor:
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']
 
-        self.num_candidates = config.get('NUM_CANDIDATES', 3)
-
     def process(self, raw_csi_data: torch.Tensor) -> Optional[torch.Tensor]:
         """
         Process batch data.

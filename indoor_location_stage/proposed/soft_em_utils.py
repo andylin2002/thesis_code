@@ -192,67 +192,65 @@ def _gaussian_log_pdf_linear(x, mean, var):
     """ Standard Gaussian Log PDF: -0.5*log(2pi*var) - (x-mu)^2/(2var) """
     return -0.5 * (torch.log(2 * torch.pi * var) + (x - mean)**2 / var)
 
-# ==========================================
-# 2. Forward-Backward Algorithm
-# ==========================================
-# TODO: check
 def run_forward_backward(
-    emission_log_probs: torch.Tensor,     # Shape: (G, T)
-    neighbor_index_matrix: torch.Tensor,  # Shape: (G, 9)
+    emission_log_probs: torch.Tensor,     # (G, T), log P(z_t | x_t=g) up to a constant
+    neighbor_index_matrix: torch.Tensor,  # (G, K), -1 means invalid neighbor
     device: torch.device
 ) -> torch.Tensor:
     """
-    Computes Posterior (Gamma) using Forward-Backward in log-space.
-    Returns: gamma (G, T) where values sum to 1 per time step.
+    Forward-Backward in log-space on a neighbor graph.
+
+    Assumptions:
+    - Transition is uniform over valid neighbors.
+    - Degree-normalized to avoid bias toward high-degree nodes.
+
+    Returns:
+    - gamma: (G, T), posterior P(x_t=g | z_{1:T}), each column sums to 1.
     """
     G, T = emission_log_probs.shape
-    
-    # --- 1. Forward Pass (Alpha) ---
-    log_alpha = torch.zeros((G, T), device=device)
-    log_alpha[:, 0] = emission_log_probs[:, 0] 
+    invalid_val = -1e9
 
-    invalid_val = -1e9 # Mask value for invalid neighbors
+    # Valid neighbor mask and per-state degree
+    valid_mask = (neighbor_index_matrix != -1)                 # (G, K)
+    degree = valid_mask.sum(dim=1).clamp(min=1).float()        # (G,)
+    log_uniform = -torch.log(degree)                           # (G,), log(1/degree)
+
+    # Optional: uniform initial distribution
+    log_pi = -torch.log(torch.tensor(float(G), device=device))
+
+    # ---------- Forward (alpha) ----------
+    log_alpha = torch.empty((G, T), device=device)
+    log_alpha[:, 0] = log_pi + emission_log_probs[:, 0]
+
+    # Safe gather: clamp -1 to 0, then mask it out
+    neigh_safe = neighbor_index_matrix.clamp(min=0)
 
     for t in range(1, T):
-        prev_alpha = log_alpha[:, t-1]
-        
-        # Gather neighbor alphas: (G, 9)
-        neighbor_alphas = prev_alpha[neighbor_index_matrix] 
-        
-        # Mask invalid neighbors
-        mask = (neighbor_index_matrix == -1)
-        neighbor_alphas[mask] = invalid_val
-        
-        # LogSumExp (assume uniform transition probability)
-        log_transition_sum = torch.logsumexp(neighbor_alphas, dim=1)
-        
-        log_alpha[:, t] = emission_log_probs[:, t] + log_transition_sum
+        prev = log_alpha[:, t - 1]                             # (G,)
+        neigh_prev = prev[neigh_safe]                          # (G, K)
+        neigh_prev = torch.where(
+            valid_mask, neigh_prev, torch.full_like(neigh_prev, invalid_val)
+        )
 
-    # --- 2. Backward Pass (Beta) ---
+        log_trans = torch.logsumexp(neigh_prev, dim=1) + log_uniform
+        log_alpha[:, t] = emission_log_probs[:, t] + log_trans
+
+    # ---------- Backward (beta) ----------
     log_beta = torch.zeros((G, T), device=device)
-    
-    for t in range(T-2, -1, -1):
-        next_beta = log_beta[:, t+1]
-        next_emission = emission_log_probs[:, t+1]
-        
-        # Potential from future
-        next_potential = next_beta + next_emission
-        
-        # Scatter back to neighbors (Symmetric Graph)
-        neighbor_potentials = next_potential[neighbor_index_matrix]
-        
-        mask = (neighbor_index_matrix == -1)
-        neighbor_potentials[mask] = invalid_val
-        
-        log_beta[:, t] = torch.logsumexp(neighbor_potentials, dim=1)
 
-    # --- 3. Compute Posterior (Gamma) ---
-    log_gamma_unnormalized = log_alpha + log_beta
-    
-    # Normalize per time step
-    log_normalization = torch.logsumexp(log_gamma_unnormalized, dim=0, keepdim=True)
-    log_gamma = log_gamma_unnormalized - log_normalization
-    
+    for t in range(T - 2, -1, -1):
+        next_pot = log_beta[:, t + 1] + emission_log_probs[:, t + 1]  # (G,)
+        neigh_next = next_pot[neigh_safe]                               # (G, K)
+        neigh_next = torch.where(
+            valid_mask, neigh_next, torch.full_like(neigh_next, invalid_val)
+        )
+
+        log_beta[:, t] = torch.logsumexp(neigh_next, dim=1) + log_uniform
+
+    # ---------- Posterior (gamma) ----------
+    log_gamma = log_alpha + log_beta
+    log_gamma = log_gamma - torch.logsumexp(log_gamma, dim=0, keepdim=True)
+
     return log_gamma.exp()
 
 # ==========================================
