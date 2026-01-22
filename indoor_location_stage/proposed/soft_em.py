@@ -58,6 +58,8 @@ class SoftEM_Algorithm:
         ).to(device)
 
         self.final_emission_log_probs: Optional[torch.Tensor] = None
+        self.final_spatiotemporal_probs: Optional[torch.Tensor] = None
+        self._debug_epd = None
 
     def initialize_params(self) -> TypePropParams:
         """
@@ -86,26 +88,29 @@ class SoftEM_Algorithm:
             old_params = {k: v.clone() for k, v in self.propagation_params.items()}
 
             # 1. E-Step: Calculate Emission Probability Distribution
-            emission_log_probs = soft_em_utils.calculate_emission_log_probs(
+            emission_log_probs, epd_debug = soft_em_utils.calculate_emission_log_probs(
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
                 self.grid_delay_qg,
+                return_debug=True
             )
             self.final_emission_log_probs = emission_log_probs
+            self._debug_epd = epd_debug
             
             # 2. E-Step: Compute Spatio-Temporal Probability Distribution (Posterior)
-            gamma_gt = soft_em_utils.run_forward_backward(
+            stpd_gt = soft_em_utils.run_forward_backward(
                 emission_log_probs,
                 self.neighbor_matrix,
                 self.device
             )
+            self.final_spatiotemporal_probs = stpd_gt
             
             # 3. M-Step: Update Parameters using Soft Weights
             new_params = soft_em_utils.update_soft_parameters(
                 self.features,
                 self.propagation_params,
-                gamma_gt,
+                stpd_gt,
                 self.grid_angle_qg, 
                 self.grid_delay_qg
             )
@@ -137,3 +142,9 @@ class SoftEM_Algorithm:
         if self.final_emission_log_probs is None:
             raise RuntimeError("Run step_parameters() first!")
         return self.final_emission_log_probs
+    
+    def get_final_stpd(self) -> torch.Tensor:
+        """ Returns the STPD from the last iteration. """
+        if self.final_spatiotemporal_probs is None:
+            raise RuntimeError("Run step_parameters() first!")
+        return self.final_spatiotemporal_probs
