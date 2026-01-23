@@ -194,15 +194,24 @@ class ProposedEstimator:
         print(f"[Estimator] Metrics saved to {debug_path}")
 
         dbg = self.param_optimizer._debug_epd
-        np.save(os.path.join(debug_dir, "mixed_log_prob_qgt.npy"), dbg["mixed_log_prob_qgt"].detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "var_aoa_qtc.npy"), dbg["var_aoa_qtc"].detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "var_tof_qtc.npy"), dbg["var_tof_qtc"].detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "penalty_qtc.npy"), dbg["penalty_qtc"].detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "gain_qtc.npy"), dbg["gain_qtc"].detach().cpu().numpy())
+        # Always-present (AoA-only debug)
+        if "mixed_log_prob_qgt" in dbg:
+            np.save(os.path.join(debug_dir, "mixed_log_prob_qgt.npy"), dbg["mixed_log_prob_qgt"].detach().cpu().numpy())
+        if "var_aoa_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "var_aoa_qtc.npy"), dbg["var_aoa_qtc"].detach().cpu().numpy())
+        if "penalty_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "penalty_qtc.npy"), dbg["penalty_qtc"].detach().cpu().numpy())
+        if "gain_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "gain_qtc.npy"), dbg["gain_qtc"].detach().cpu().numpy())
+
+        # Optional (only exists if you still compute ToF-related debug somewhere)
+        if "var_tof_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "var_tof_qtc.npy"), dbg["var_tof_qtc"].detach().cpu().numpy())
         if "var_tof_base_qtc" in dbg:
             np.save(os.path.join(debug_dir, "var_tof_base_qtc.npy"), dbg["var_tof_base_qtc"].detach().cpu().numpy())
         if "tof_inflation_qtc" in dbg:
             np.save(os.path.join(debug_dir, "tof_inflation_qtc.npy"), dbg["tof_inflation_qtc"].detach().cpu().numpy())
+
 
         mixed = dbg["mixed_log_prob_qgt"]  # (Q,G,T)
         g_star = torch.argmax(self.epd, dim=0)          # (T,)
@@ -216,12 +225,16 @@ class ProposedEstimator:
 
         LIGHT_SPEED = 299792458.0
 
-        var_tof = np.load("output/debug/var_tof_qtc.npy")  # (Q,T,C) sec^2
-        var_tof_t = torch.from_numpy(var_tof)
+        p = os.path.join(debug_dir, "var_tof_qtc.npy")
+        if os.path.exists(p):
+            var_tof = np.load("output/debug/var_tof_qtc.npy")  # (Q,T,C) sec^2
+            var_tof_t = torch.from_numpy(var_tof)
 
-        std_tof_m = torch.sqrt(var_tof_t) * LIGHT_SPEED
-        print("[ToF STD] median(m):", std_tof_m.median().item())
-        print("[ToF STD] p95(m):", torch.quantile(std_tof_m.flatten(), 0.95).item())
+            std_tof_m = torch.sqrt(var_tof_t) * LIGHT_SPEED
+            print("[ToF STD] median(m):", std_tof_m.median().item())
+            print("[ToF STD] p95(m):", torch.quantile(std_tof_m.flatten(), 0.95).item())
+        else:
+            print("[ToF] var_tof_qtc.npy not found (ToF not used in EPD).")
 
         features = np.load("output/csi_features.npy")  # (Q,T,C,5)
         features_t = torch.from_numpy(features)

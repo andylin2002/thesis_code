@@ -3,8 +3,6 @@
 import torch
 from typing import Callable, Tuple, Optional
 
-from .grid_tools import convert_grid_indices_to_coords
-
 class Viterbi_Algorithm:
     def __init__(self, G: int, T: int, reference_grid: torch.Tensor, device: torch.device):
         """
@@ -25,34 +23,46 @@ class Viterbi_Algorithm:
         get_max_previous_score: Callable,
         **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Execute Viterbi Forward-Backward algorithm.
 
-        Args:
-            emission_log_probs: Pre-calculated log probs (G, T).
-            neighbor_index_matrix: Adjacency info (G, 9).
-            transition_handler: Callback to calc transition probs. 
-                                Sig: (neighbor_matrix, delta, history_coords, **kwargs) -> (indices, values)
-            **transition_kwargs: Extra args for handler (e.g., model, mode, sos_token).
-
-        Returns:
-            trajectory: Optimal path coordinates (T, 2).
-            max_log_prob: Total log probability of the path.
-        """
         # 1. Initialization (t=0)
         delta = emission_log_probs[:, 0].clone()
+
+        # --- Precompute adjacency validity (graph-level invariant) ---
+        # neighbor_index_matrix: (G, K), -1 means invalid neighbor
+        valid_mask = (neighbor_index_matrix != -1)          # (G, K)
+        no_valid = ~valid_mask.any(dim=1)                   # (G,)
+        row_indices = torch.arange(self.G, device=self.device)
 
         # 2. Forward Pass
         for t in range(1, self.T):
             current_emission_log_probs = emission_log_probs[:, t]
 
-            # Calculate best transitions using external handler
             winner_indices, max_prev_path_scores = get_max_previous_score(
                 neighbor_index_matrix, 
                 delta,
                 t, 
                 **kwargs
             )
+
+            # =========================================================
+            # [GUARD] If a node has no valid neighbors, force self-transition
+            # Score uses previous delta[g] (i.e., transition log-prob = 0)
+            # =========================================================
+            if no_valid.any():
+                winner_indices = winner_indices.clone()
+                max_prev_path_scores = max_prev_path_scores.clone()
+
+                winner_indices[no_valid] = row_indices[no_valid]
+                max_prev_path_scores[no_valid] = delta[no_valid]
+
+            # (Optional extra safety)
+            # If some hook accidentally returns -1 for other reasons, also self-fix:
+            invalid_winner = (winner_indices < 0) | (winner_indices >= self.G)
+            if invalid_winner.any():
+                winner_indices = winner_indices.clone()
+                max_prev_path_scores = max_prev_path_scores.clone()
+                winner_indices[invalid_winner] = row_indices[invalid_winner]
+                max_prev_path_scores[invalid_winner] = delta[invalid_winner]
 
             # Update delta: Emission + Max(Prev_Delta + Transition)
             delta = current_emission_log_probs + max_prev_path_scores
@@ -64,9 +74,10 @@ class Viterbi_Algorithm:
         max_log_prob, best_end_node = torch.max(delta, dim=0)
 
         # 4. Backward Pass
-        trajectory = self._traceback_final_trajectory(self.T-1, best_end_node)
-        
+        trajectory = self._traceback_final_trajectory(self.T - 1, best_end_node)
+
         return trajectory, max_log_prob
+
 
     def _traceback_final_trajectory(self, end_t: int, end_node_index: torch.Tensor) -> torch.Tensor:
         """

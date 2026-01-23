@@ -92,7 +92,6 @@ class SoftEM_Algorithm:
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
-                self.grid_delay_qg,
                 return_debug=True
             )
             self.final_emission_log_probs = emission_log_probs
@@ -111,8 +110,7 @@ class SoftEM_Algorithm:
                 self.features,
                 self.propagation_params,
                 stpd_gt,
-                self.grid_angle_qg, 
-                self.grid_delay_qg
+                self.grid_angle_qg
             )
             
             self.propagation_params = new_params
