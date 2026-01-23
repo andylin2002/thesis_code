@@ -139,6 +139,24 @@ def calculate_emission_log_probs(
     var_aoa = torch.clamp(var_aoa, min=1e-6)
     var_tof = torch.clamp(var_tof, min=1e-18)
 
+    # -----------------------------
+    # Robust ToF hockey-stick gating (per q,t,c)
+    # -----------------------------
+    LIGHT_SPEED = 299792458.0  # m/s
+    TOF_S0_M = 2.0             # turning point (meters)
+    TOF_ALPHA = 25.0           # aggressiveness
+    TOF_POWER = 2.0            # super-linear growth
+    TOF_INFLATION_MAX = 1e6    # cap to avoid inf
+
+    var_tof_base_qtc = var_tof  # for debug
+
+    tof_sprd_m_qtc = obs_tof_sprd * LIGHT_SPEED
+    ratio = torch.relu(tof_sprd_m_qtc / TOF_S0_M - 1.0)
+    tof_inflation_qtc = 1.0 + TOF_ALPHA * torch.pow(ratio, TOF_POWER)
+    tof_inflation_qtc = torch.clamp(tof_inflation_qtc, min=1.0, max=TOF_INFLATION_MAX)
+
+    var_tof = torch.clamp(var_tof * tof_inflation_qtc, min=1e-18)
+
     # Reshape for Broadcasting: [Q, T, C] -> [Q, 1, T, C]
     var_aoa = var_aoa.unsqueeze(1)
     var_tof = var_tof.unsqueeze(1)
@@ -188,6 +206,8 @@ def calculate_emission_log_probs(
         "mixed_log_prob_qgt": mixed_log_prob,  # (Q,G,T)
         "var_aoa_qtc": var_aoa.squeeze(1),      # (Q,T,C) 你前面 unsqueeze(1) 了
         "var_tof_qtc": var_tof.squeeze(1),      # (Q,T,C)
+        "var_tof_base_qtc": var_tof_base_qtc,        # (Q,T,C)
+        "tof_inflation_qtc": tof_inflation_qtc,      # (Q,T,C)
         "penalty_qtc": penalty_factor,          # (Q,T,C)
         "gain_qtc": obs_gain_cand,              # (Q,T,C)
     }
@@ -203,6 +223,22 @@ def _gaussian_log_pdf_angular(x, mean, var):
 def _gaussian_log_pdf_linear(x, mean, var):
     """ Standard Gaussian Log PDF: -0.5*log(2pi*var) - (x-mu)^2/(2var) """
     return -0.5 * (torch.log(2 * torch.pi * var) + (x - mean)**2 / var)
+
+def _hockey_stick_inflate(var_base: torch.Tensor,
+                          spread: torch.Tensor,
+                          s0: float,
+                          k: float,
+                          p: float = 2.0) -> torch.Tensor:
+    """
+    Hockey-stick inflation on variance.
+
+    var = var_base                           , if spread <= s0
+          var_base + k*(spread - s0)^p       , if spread >  s0
+
+    All tensors are broadcastable (e.g., Q,T,C).
+    """
+    excess = torch.clamp(spread - s0, min=0.0)
+    return var_base + k * (excess ** p)
 
 def run_forward_backward(
     emission_log_probs: torch.Tensor,     # (G, T), log P(z_t | x_t=g) up to a constant
@@ -422,6 +458,12 @@ def _select_best_candidate(
     VAR_AOA_MIN = 1e-6    # deg^2
     VAR_TOF_MIN = 1e-18   # sec^2  (~1ns^2)
 
+    LIGHT_SPEED = 299792458.0
+    TOF_S0_M = 2.0
+    TOF_ALPHA = 25.0
+    TOF_POWER = 2.0
+    TOF_INFLATION_MAX = 1e6
+
     for c in range(C):
         cand_aoa = features[:, :, c, 0]
         cand_tof = features[:, :, c, 2]
@@ -440,6 +482,13 @@ def _select_best_candidate(
 
         var_aoa = torch.clamp(var_aoa, min=VAR_AOA_MIN)
         var_tof = torch.clamp(var_tof, min=VAR_TOF_MIN)
+
+        # Same robust ToF hockey-stick gating as E-step (EM consistency)
+        tof_sprd_m = sprd_tof * LIGHT_SPEED
+        ratio = torch.relu(tof_sprd_m / TOF_S0_M - 1.0)
+        tof_inflation = 1.0 + TOF_ALPHA * torch.pow(ratio, TOF_POWER)
+        tof_inflation = torch.clamp(tof_inflation, min=1.0, max=TOF_INFLATION_MAX)
+        var_tof = torch.clamp(var_tof * tof_inflation, min=VAR_TOF_MIN)
 
         # Gaussian NLL (drop constant terms):
         # err = (diff^2 / var) + log(var)

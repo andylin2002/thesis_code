@@ -199,6 +199,10 @@ class ProposedEstimator:
         np.save(os.path.join(debug_dir, "var_tof_qtc.npy"), dbg["var_tof_qtc"].detach().cpu().numpy())
         np.save(os.path.join(debug_dir, "penalty_qtc.npy"), dbg["penalty_qtc"].detach().cpu().numpy())
         np.save(os.path.join(debug_dir, "gain_qtc.npy"), dbg["gain_qtc"].detach().cpu().numpy())
+        if "var_tof_base_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "var_tof_base_qtc.npy"), dbg["var_tof_base_qtc"].detach().cpu().numpy())
+        if "tof_inflation_qtc" in dbg:
+            np.save(os.path.join(debug_dir, "tof_inflation_qtc.npy"), dbg["tof_inflation_qtc"].detach().cpu().numpy())
 
         mixed = dbg["mixed_log_prob_qgt"]  # (Q,G,T)
         g_star = torch.argmax(self.epd, dim=0)          # (T,)

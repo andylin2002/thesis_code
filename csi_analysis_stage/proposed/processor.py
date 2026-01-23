@@ -6,7 +6,7 @@ import os
 import torch
 
 # Import common utilities
-from .._common.preprocessing import run_data_processor
+from .._common.preprocessing.aggregation import run_csi_aggregation
 from .._common.extraction.mmp import MMP_Algorithm
 
 class ProposedProcessor:
@@ -29,7 +29,7 @@ class ProposedProcessor:
         Process batch data.
         """
         # --- Data Preprocessing ---
-        processed_csi = run_data_processor(
+        processed_csi = run_csi_aggregation(
             raw_csi_data=raw_csi_data,
             config=self.config
         )
