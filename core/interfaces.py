@@ -6,37 +6,31 @@ from multiprocessing import Process, Event, Queue
 
 class ISignalProcessor(ABC):
     """
-    Interface for signal processing strategies.
-    Responsible for converting raw CSI into features.
+    Convert raw CSI into model features.
     """
     @abstractmethod
     def extract(self, raw_csi_block):
         """
         Args:
-            raw_csi_block: Raw CSI data chunk from the queue.
-        
+            raw_csi_block: Raw CSI tensor for one batch.
         Returns:
-            dict: Processed data based on mode.
-                  - Baseline: {'mode': 'BASELINE', 'features': ...}
-                  - Proposed: {'mode': 'PROPOSED', 'features': ..., 'spd': ...}
+            features: torch.Tensor
         """
-        pass
+        raise NotImplementedError
 
 class ILocationEstimator(ABC):
     """
-    Interface for location estimation strategies.
-    Responsible for estimating trajectories using features.
+    Estimate trajectory from features.
     """
     @abstractmethod
     def estimate(self, signal_data):
         """
         Args:
-            signal_data (dict): The output dictionary from ISignalProcessor.extract().
-            
+            features: torch.Tensor
         Returns:
-            Tensor/np.array: The predicted path coordinates.
+            trajectory: torch.Tensor (T, 2)
         """
-        pass
+        raise NotImplementedError
 
 class BaseWorker(Process, ABC):
     """
@@ -71,15 +65,8 @@ class BaseWorker(Process, ABC):
 
     @abstractmethod
     def _setup(self):
-        """
-        Perform heavy initialization here (e.g., loading models, creating buffers).
-        Runs inside the child process to ensure memory isolation.
-        """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def _loop(self):
-        """
-        The main execution loop. Should monitor `self.stop_event`.
-        """
-        pass
+        raise NotImplementedError

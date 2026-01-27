@@ -1,13 +1,10 @@
 # workers/csi_worker.py
 
 import torch
-import numpy as np
-from collections import deque
-from core.interfaces import BaseWorker
-from modules.factory import SystemFactory
 from queue import Empty
 
-from transformer.transformer_tool import create_transformer_instance
+from core.interfaces import BaseWorker
+from modules.factory import SystemFactory
 
 class CSI_Worker(BaseWorker):
     """
@@ -26,7 +23,6 @@ class CSI_Worker(BaseWorker):
         # Placeholders for strategies and models
         self.signal_processor = None
         self.location_estimator = None
-        self.history_buffer = None
 
     def _setup(self):
         """
@@ -44,12 +40,7 @@ class CSI_Worker(BaseWorker):
             self.device,
             self.reference_grid,
             self.directions_vectors,
-            transformer_model=None # Initially None, updated via model_queue
         )
-        
-        # 2. Initialize Sliding Window Buffer (Proposed Mode Only)
-        buffer_len = self.config.get('BUFFER_LEN', 10)
-        self.history_buffer = deque(maxlen=buffer_len)
         
         print(f"[{self.name}] Setup complete. Strategies loaded.")
 
@@ -57,10 +48,10 @@ class CSI_Worker(BaseWorker):
         """
         Main inference loop.
         """
-        in_queue = self.queues['data']      # Raw CSI input
-        out_queue = self.queues['result']   # Output to AI Worker / UI
-        model_queue = self.queues['model']  # Receive updated AI model
-        save_queue = self.queues['save']    # To Main Process (Saving/Plotting)
+        in_queue = self.queues['data']                  # Raw CSI input
+        out_queue = self.queues['result']               # Output to AI Worker / UI
+        debug_queue = self.queues.get("debug", None)     # To Main Process (Saving/Plotting)
+        model_queue = self.queues.get('model', None)    # Receive updated AI model
 
         while not self.stop_event.is_set():
             try:
@@ -72,39 +63,28 @@ class CSI_Worker(BaseWorker):
                 # Move to GPU for Processing
                 raw_csi_block = raw_csi_block.to(self.device)
 
-                # Check for Model Updates (Hot-Swapping)
-                if not model_queue.empty():
-                    new_model_config = model_queue.get()
-                    self._update_model(new_model_config)
+                # Apply latest gating update if exists (state_dict only)
+                if model_queue is not None:
+                    self._apply_latest_gating_state_dict(model_queue)
 
                 # Strategy Execution: Signal Processing
-                # Returns dict with 'mode', 'features', ('spd')
-                processed_data = self.signal_processor.extract(raw_csi_block)
-
-                if 'features' in processed_data:
-                    self.history_buffer.append(processed_data['features'])
-                    processed_data['buffer'] = list(self.history_buffer)
+                features = self.signal_processor.extract(raw_csi_block)
 
                 # Strategy Execution: Location Estimation
-                # Returns Tensor/np.array of the predicted path
-                trajectory = self.location_estimator.estimate(processed_data)
+                trajectory = self.location_estimator.estimate(features)
 
-                # Output Handling
-                if processed_data.get('mode') == 'PROPOSED':
-                    # For Proposed mode, we send the "Input + Label" package to AI Worker
-                    training_pkg = {
-                        'input': processed_data, # Features, SPD, EPD
-                        'pseudo_gt': trajectory  # Path from Viterbi
-                    }
-                    training_pkg_cpu = self._recursive_detach_cpu(training_pkg)
-                    out_queue.put(training_pkg_cpu)
-                    save_queue.put(training_pkg_cpu['pseudo_gt'])
-                else:
-                    # For Baseline, just output the path (or handle differently)
-                    # Here we wrap it to match the queue expectation if needed
-                    trajectory_cpu = self._recursive_detach_cpu(trajectory)
-                    out_queue.put(trajectory_cpu)
-                    save_queue.put(trajectory_cpu)
+                pkg = {
+                    "trajectory": trajectory,
+                    "training": {
+                        "features": features,
+                    },
+                }
+                pkg_cpu = self._recursive_detach_cpu(pkg)
+                out_queue.put(pkg_cpu)
+
+                # Debug queue (optional)
+                if debug_queue is not None:
+                    debug_queue.put(pkg_cpu["trajectory"])
 
                 in_queue.task_done()
 
@@ -113,43 +93,6 @@ class CSI_Worker(BaseWorker):
                 import traceback
                 traceback.print_exc()
                 in_queue.task_done()
-
-    def _update_model(self, model_config):
-        """
-        Handles both 'Hot-Swap' and 'Cold-Start' scenarios.
-        """
-        version = model_config.get('version', 'Unknown')
-        print(f"[{self.name}] Received AI Model Update (V{version})")
-        
-        # Validation: Ensure strategy supports AI
-        if not hasattr(self.location_estimator, 'transformer_model'):
-            print(f"[{self.name}] Warning: Current strategy ignores AI model.")
-            return
-
-        try:
-            weights = model_config['weights']
-            
-            # Case 1: Model exists -> Hot swap weights
-            if self.location_estimator.transformer_model is not None:
-                self.location_estimator.transformer_model.load_state_dict(weights)
-                
-            # Case 2: Cold Start -> Instantiate, load, and assign
-            else:
-                # Create model instance
-                n_directions = 9 
-                model = create_transformer_instance(self.config, n_directions, self.device)
-                
-                # Load weights and set to eval mode
-                model.load_state_dict(weights)
-                model.eval() 
-                
-                # Inject model into the strategy
-                self.location_estimator.transformer_model = model
-                
-            print(f"[{self.name}] Model V{version} updated successfully.")
-            
-        except Exception as e:
-            print(f"[{self.name}] Failed to update model: {e}")
 
     def _recursive_detach_cpu(self, data):
         """
@@ -166,3 +109,23 @@ class CSI_Worker(BaseWorker):
             return tuple(self._recursive_detach_cpu(v) for v in data)
         else:
             return data
+        
+    def _apply_latest_gating_state_dict(self, model_queue):
+        """
+        Drain model_queue and apply the latest state_dict to the location strategy.
+        Payload format is expected to be:
+            {"state_dict": <dict or None>}
+        """
+        latest = None
+        while not model_queue.empty():
+            latest = model_queue.get()
+
+        if latest is None:
+            return
+
+        # Strict: state_dict only (no model instance here)
+        state_dict = latest.get("state_dict", None)
+
+        # Forward to strategy (only Proposed strategy should implement this)
+        if hasattr(self.location_estimator, "set_gating_state_dict"):
+            self.location_estimator.set_gating_state_dict(state_dict)

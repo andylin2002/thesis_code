@@ -59,6 +59,8 @@ class SoftEM_Algorithm:
 
         self.final_emission_log_probs: Optional[torch.Tensor] = None
         self.final_spatiotemporal_probs: Optional[torch.Tensor] = None
+        self.ap_time_gate: Optional[torch.Tensor] = None
+
         self._debug_epd = None
 
     def initialize_params(self) -> TypePropParams:
@@ -92,6 +94,7 @@ class SoftEM_Algorithm:
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
+                ap_time_gate=self.ap_time_gate,
                 return_debug=True
             )
             self.final_emission_log_probs = emission_log_probs
@@ -134,6 +137,13 @@ class SoftEM_Algorithm:
                 max_diff = diff
         
         return max_diff < 1e-4
+    
+    def set_ap_time_gate(self, ap_time_gate: Optional[torch.Tensor]):
+        """
+        ap_time_gate: (Q, T) in [0,1] or None
+        """
+        self.ap_time_gate = ap_time_gate
+
     
     def get_final_epd(self) -> torch.Tensor:
         """ Returns the EPD from the last iteration. """

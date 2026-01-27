@@ -1,7 +1,8 @@
 # indoor_location_stage/proposed/soft_em_utils.py
 
 import torch
-from typing import Dict, Any, Tuple
+import math
+from typing import Dict, Any, Tuple, Optional
 
 from .._common import math_tools
 
@@ -89,6 +90,7 @@ def calculate_emission_log_probs(
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
     grid_angle_qg: torch.Tensor,
+    ap_time_gate: Optional[torch.Tensor] = None, 
     return_debug: bool=False
 ) -> torch.Tensor:
     """
@@ -107,71 +109,89 @@ def calculate_emission_log_probs(
     # Step 1: Calculate Mixture Weights (based on Gain)
     # =========================================================
     # Calculate Penalty
-    max_gain_q, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)
-    norm_gain = obs_gain_cand / (max_gain_q + 1e-9)
-    penalty_factor = 1.0 / (norm_gain + 0.1)
+    max_gain_q, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)          # (Q, T, 1)
+    norm_gain = obs_gain_cand / (max_gain_q + 1e-9)                        # (Q, T, C)
+    penalty_factor = 1.0 / (norm_gain + 0.1)                               # (Q, T, C)
 
-    # Normalize gains to probabilities: w_k = gain_k / sum(gain)
-    sum_gain = torch.sum(obs_gain_cand, dim=2, keepdim=True) + 1e-9
-    weights = obs_gain_cand / sum_gain
-    
-    # Convert to log domain for addition later: [Q, T, C]
-    log_weights = torch.log(weights + 1e-9)
+    # Calculate Weight (Normalize & Convert to Log Domain)
+    sum_gain = torch.sum(obs_gain_cand, dim=2, keepdim=True) + 1e-9        # (Q, T, 1)
+    weights = obs_gain_cand / sum_gain                                     # (Q, T, C)
+    log_weights = torch.log(weights + 1e-9)                                # (Q, T, C)
 
     # =========================================================
     # Step 2: Construct Gaussian Distributions (Variance)
     # =========================================================
-    # Align Bias dims for addition: [Q] -> [Q, 1, 1]
-    bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)
-
-    # Dynamic Variance based on Spread: [Q, T, C]
-    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa) * penalty_factor
+    # Align Bias & Construct Dynamic Variance based on Spread
+    bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)                          # (Q, 1, 1)
+    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa)      # (Q, T, C)
+    var_aoa = var_aoa * penalty_factor                                     # (Q, T, C)
 
     # Clamp for stability
-    var_aoa = torch.clamp(var_aoa, min=1e-6).unsqueeze(1)
+    var_aoa = torch.clamp(var_aoa, min=1e-6).unsqueeze(1)                  # (Q, 1, T, C)
 
     # =========================================================
     # Step 3: Construct Mean Vectors (Grid Geometry)
     # =========================================================
-    # Align Grid dims: [Q, G] -> [Q, G, 1, 1]
-    grid_angle_exp = grid_angle_qg.view(Q, G, 1, 1)
-
-    # Align Offset dims: [Q] -> [Q, 1, 1, 1]
-    offset_aoa = params['aoa_offset_q'].view(Q, 1, 1, 1)
-
-    # Predicted Mean: [Q, G, 1, 1]
-    mean_aoa = grid_angle_exp + offset_aoa
+    grid_angle_exp = grid_angle_qg.view(Q, G, 1, 1)                        # (Q, G, 1, 1)
+    offset_aoa = params['aoa_offset_q'].view(Q, 1, 1, 1)                   # (Q, 1, 1, 1)
+    mean_aoa = grid_angle_exp + offset_aoa                                 # (Q, G, 1, 1)
 
     # =========================================================
     # Step 4: Calculate Mixture Log Probability
     # =========================================================
-    # Reshape Obs for Broadcasting: [Q, T, C] -> [Q, 1, T, C]
-    aoa_x = obs_aoa_cand.unsqueeze(1)
-
-    # Compute Gaussian Log PDF -> Output: [Q, G, T, C]
-    # (Broadcasting handles Q, G, T, C alignment automatically)
-    log_prob_aoa = _gaussian_log_pdf_angular(aoa_x, mean_aoa, var_aoa)
-    total_log_prob_k = log_prob_aoa + log_weights.unsqueeze(1)
+    aoa_x = obs_aoa_cand.unsqueeze(1)                                      # (Q, 1, T, C)
+    log_prob_aoa = _gaussian_log_pdf_angular(aoa_x, mean_aoa, var_aoa)     # (Q, G, T, C)
+    total_log_prob_k = log_prob_aoa + log_weights.unsqueeze(1)             # (Q, G, T, C)
 
     # =========================================================
     # Step 5: Integration (LogSumExp)
     # =========================================================
-    # 1. Integrate Candidates (dim=3): log(sum(exp(P_k))) -> [Q, G, T]
-    mixed_log_prob = torch.logsumexp(total_log_prob_k, dim=-1)
+    mixed_log_prob = torch.logsumexp(total_log_prob_k, dim=-1)             # (Q, G, T)
 
-    # 2. Integrate APs (dim=0): Sum log probs -> [G, T]
-    emission_log_probs_gt = torch.sum(mixed_log_prob, dim=0)
+    # =========================================================
+    # Step 6: Integrate APs (Optional ap_time_gate Gating)
+    # =========================================================
+    log_gate_qt = None
+    mixed_log_prob_gated = None
+
+    if ap_time_gate is None:
+        emission_log_probs_gt = torch.sum(mixed_log_prob, dim=0)           # (G, T)
+
+    else:
+        # Align Weight dims: [Q, T] -> [Q, 1, T]
+        ap_time_gate = ap_time_gate.to(mixed_log_prob.device).type_as(mixed_log_prob)
+
+        # Sanity Check
+        if ap_time_gate.shape != (Q, T):
+            raise ValueError(
+                f"ap_time_gate shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(ap_time_gate.shape)}"
+            )
+
+        # Log-Gating Bias (w=1 -> 0, w=0 -> strong penalty)
+        # Note: using eps to avoid -inf and keep numerically stable
+        eps = 1e-3
+        ap_time_gate = torch.clamp(ap_time_gate, min=0.0, max=1.0)
+        log_gate_qt = torch.log(ap_time_gate + eps) - math.log(1.0 + eps)   # (Q, T)
+
+        mixed_log_prob_gated = mixed_log_prob + log_gate_qt.unsqueeze(1)    # (Q, G, T)
+        emission_log_probs_gt = torch.sum(mixed_log_prob_gated, dim=0)      # (G, T)
 
     if not return_debug:
         return emission_log_probs_gt
 
     debug = {
-        "total_log_prob_k": total_log_prob_k,  # (Q,G,T,C)
-        "mixed_log_prob_qgt": mixed_log_prob,  # (Q,G,T)
-        "var_aoa_qtc": var_aoa.squeeze(1),      # (Q,T,C) 你前面 unsqueeze(1) 了
-        "penalty_qtc": penalty_factor,          # (Q,T,C)
-        "gain_qtc": obs_gain_cand,              # (Q,T,C)
+        "total_log_prob_k": total_log_prob_k,                               # (Q, G, T, C)
+        "mixed_log_prob_qgt": mixed_log_prob,                               # (Q, G, T)
+        "var_aoa_qtc": var_aoa.squeeze(1),                                  # (Q, T, C)
+        "penalty_qtc": penalty_factor,                                      # (Q, T, C)
+        "gain_qtc": obs_gain_cand,                                          # (Q, T, C)
     }
+
+    if ap_time_gate is not None:
+        debug["ap_time_gate"] = ap_time_gate                                # (Q, T)
+        debug["log_gate_qt"] = log_gate_qt                                  # (Q, T)
+        debug["mixed_log_prob_qgt_gated"] = mixed_log_prob_gated            # (Q, G, T)
+
     return emission_log_probs_gt, debug
 
 def _gaussian_log_pdf_angular(x, mean, var):
@@ -434,25 +454,16 @@ def _weighted_linear_regression(x, y, w, min_slope, min_bias):
 
 def get_max_previous_score(
     neighbor_index_matrix: torch.Tensor, 
-    delta: torch.Tensor, 
-    t: int, 
-    **kwargs
+    delta: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Calculates best previous node.
     Hybrid Logic: AI Prediction + Geometric Constraints.
     """
-    model = kwargs.get('model')
     
     G = delta.shape[0]
     K = neighbor_index_matrix.shape[1]
     device = delta.device
-    
-    # --- AI Prediction ---
-    ai_scores = 0.0
-    if model is not None:
-        # TODO: Implement Transformer inference
-        pass
 
     # --- Geometric Constraints ---
     invalid_score = -float('inf')

@@ -12,7 +12,7 @@ from queue import Empty
 import utils
 
 from workers.csi_worker import CSI_Worker
-from workers.tfm_worker import TFM_Worker
+# from workers.mlp_worker import MLP_Worker
 
 # Configuration
 CONFIG_PATH = 'config.yaml'
@@ -82,7 +82,7 @@ def main():
         'data': JoinableQueue(), 
         'result': Queue(),       
         'model': Queue(), 
-        'save': Queue()
+        'debug': Queue()
     }
     stop_event = Event()
 
@@ -98,18 +98,18 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    tfm_worker = TFM_Worker(
-        name="TFM_Worker",
-        config=config,
-        queues=queues,
-        stop_event=stop_event,
-        directions_vectors=directions_vectors,
-        checkpoint_path=ckpt_path
-    )
+    # mlp_worker = MLP_Worker(
+    #     name="MLP_Worker",
+    #     config=config,
+    #     queues=queues,
+    #     stop_event=stop_event,
+    #     directions_vectors=directions_vectors,
+    #     checkpoint_path=ckpt_path
+    # )
 
     # 7. Start Processes
     csi_worker.start()
-    tfm_worker.start()
+    # mlp_worker.start()
 
     # 8. Main Loop
     hmatrix_list = config.get('HMATRIX_LIST', [])
@@ -153,8 +153,8 @@ def main():
         # Loop until we receive exactly the number of batches sent
         while len(all_trajectories) < total_batches_sent:
             try:
-                # Listen to 'save' queue. TFM worker listens to 'result'.
-                res_path = queues['save'].get(timeout=None) 
+                # Listen to 'save' queue. MLP worker listens to 'result'.
+                res_path = queues['debug'].get(timeout=None) 
                 
                 # Convert to Numpy
                 if hasattr(res_path, 'detach'):
@@ -183,10 +183,10 @@ def main():
         print("[System] Shutting down workers...")
         stop_event.set()
         
-        tfm_worker.join(timeout=2)
+        # mlp_worker.join(timeout=2)
         csi_worker.join(timeout=2)
 
-        if tfm_worker.is_alive(): tfm_worker.terminate()
+        # if mlp_worker.is_alive(): mlp_worker.terminate()
         if csi_worker.is_alive(): csi_worker.terminate()
         
         print("[System] Shutdown complete.")

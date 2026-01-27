@@ -20,8 +20,7 @@ class Viterbi_Algorithm:
         self, 
         emission_log_probs: torch.Tensor, 
         neighbor_index_matrix: torch.Tensor,
-        get_max_previous_score: Callable,
-        **kwargs
+        get_max_previous_score: Callable
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         # 1. Initialization (t=0)
@@ -39,9 +38,7 @@ class Viterbi_Algorithm:
 
             winner_indices, max_prev_path_scores = get_max_previous_score(
                 neighbor_index_matrix, 
-                delta,
-                t, 
-                **kwargs
+                delta
             )
 
             # =========================================================

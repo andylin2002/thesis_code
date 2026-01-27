@@ -1,6 +1,5 @@
 # modules/factory.py
 
-import torch
 from strategies.analysis_strategy import BaselineAnalysisStrategy, ProposedAnalysisStrategy
 from strategies.location_strategy import BaselineLocationStrategy, ProposedLocationStrategy
 
@@ -26,7 +25,7 @@ class SystemFactory:
             raise ValueError(f"[Factory] Unknown SYSTEM_MODE: {mode}")
 
     @staticmethod
-    def create_location_estimator(config, device, reference_grid, directions_vectors, transformer_model=None):
+    def create_location_estimator(config, device, reference_grid, directions_vectors):
         """
         Creates an ILocationEstimator instance based on SYSTEM_MODE.
         """
@@ -45,8 +44,7 @@ class SystemFactory:
                 config, 
                 device, 
                 reference_grid, 
-                directions_vectors,
-                transformer_model
+                directions_vectors
             )
             
         else:

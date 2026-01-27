@@ -33,17 +33,3 @@ NUM_PACKET: 1                          # notation: P
 MIN_TRAJ_TO_TRAIN: 20000
 BATCH_SIZE: 10
 TRAINING_EPOCHS: 50
-
-CSItoTRAJECTORY_SLEEP_S: 0.1
-TRANSFORMER_SLEEP_S: 0.1
-
-### --- 4. Transformer Parameter --- ###
-EMB_SIZE: 512
-HEADS: 8
-LAYERS: 6
-DROPOUT: 0.1
-D_FF: 2048                                # Feed Forward Dimension
-
-NOAMOPT_FACTOR: 1.0
-NOAMOPT_WARMUP_STEPS: 4000
-BUFFER_LEN: 20

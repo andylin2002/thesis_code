@@ -1,12 +1,9 @@
 # indoor_location_stage/baseline/hard_em_utils.py
 
 import torch
-from typing import Dict, Any, Optional
-from torch.distributions import Normal
-
-import utils
 import numpy as np
-from transformer.transformer_tool import transformer_batch_predict_logits
+from typing import Dict, Any
+from torch.distributions import Normal
 
 from .._common import grid_tools
 from .._common import math_tools
@@ -687,9 +684,7 @@ def calculate_emission_probability(
 
 def get_max_previous_score( 
     neighbor_index_matrix: torch.Tensor, 
-    delta: torch.Tensor, 
-    t: int, 
-    **kwargs
+    delta: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     
     G = delta.shape[0]
