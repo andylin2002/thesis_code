@@ -1,4 +1,4 @@
-# workers/csi_worker.py
+# workers/infer_worker.py
 
 import torch
 from queue import Empty
@@ -6,7 +6,7 @@ from queue import Empty
 from core.interfaces import BaseWorker
 from modules.factory import SystemFactory
 
-class CSI_Worker(BaseWorker):
+class INFER_Worker(BaseWorker):
     """
     Worker responsible for real-time signal processing and location estimation.
     Operates in two modes (Baseline/Proposed) determined by SystemFactory.

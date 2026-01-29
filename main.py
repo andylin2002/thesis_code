@@ -11,8 +11,8 @@ from queue import Empty
 
 import utils
 
-from workers.csi_worker import CSI_Worker
-# from workers.mlp_worker import MLP_Worker
+from workers.infer_worker import INFER_Worker
+# from workers.adapt_worker import ADAPT_Worker
 
 # Configuration
 CONFIG_PATH = 'config.yaml'
@@ -89,8 +89,8 @@ def main():
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
-    csi_worker = CSI_Worker(
-        name="CSI_Worker",
+    infer_worker = INFER_Worker(
+        name="INFER_Worker",
         config=config,
         queues=queues,
         stop_event=stop_event,
@@ -98,8 +98,8 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    # mlp_worker = MLP_Worker(
-    #     name="MLP_Worker",
+    # adapt_worker = ADAPT_Worker(
+    #     name="ADAPT_Worker",
     #     config=config,
     #     queues=queues,
     #     stop_event=stop_event,
@@ -108,8 +108,8 @@ def main():
     # )
 
     # 7. Start Processes
-    csi_worker.start()
-    # mlp_worker.start()
+    infer_worker.start()
+    # adapt_worker.start()
 
     # 8. Main Loop
     hmatrix_list = config.get('HMATRIX_LIST', [])
@@ -153,7 +153,7 @@ def main():
         # Loop until we receive exactly the number of batches sent
         while len(all_trajectories) < total_batches_sent:
             try:
-                # Listen to 'save' queue. MLP worker listens to 'result'.
+                # Listen to 'save' queue. ADAPT worker listens to 'result'.
                 res_path = queues['debug'].get(timeout=None) 
                 
                 # Convert to Numpy
@@ -183,11 +183,11 @@ def main():
         print("[System] Shutting down workers...")
         stop_event.set()
         
-        # mlp_worker.join(timeout=2)
-        csi_worker.join(timeout=2)
+        # adapt_worker.join(timeout=2)
+        infer_worker.join(timeout=2)
 
-        # if mlp_worker.is_alive(): mlp_worker.terminate()
-        if csi_worker.is_alive(): csi_worker.terminate()
+        # if adapt_worker.is_alive(): adapt_worker.terminate()
+        if infer_worker.is_alive(): infer_worker.terminate()
         
         print("[System] Shutdown complete.")
 

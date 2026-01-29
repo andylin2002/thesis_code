@@ -68,11 +68,11 @@ class ProposedLocationStrategy(ILocationEstimator):
         }
     
     # =========================================================
-    # Public API for CSI_Worker
+    # Public API for INFER_Worker
     # =========================================================
     def set_gating_state_dict(self, state_dict: Optional[dict]) -> None:
         """
-        CSI_Worker will call this when it receives a new model update from queues['model'].
+        INFER_Worker will call this when it receives a new model update from queues['model'].
         - state_dict is stored and will be applied lazily.
         - if state_dict is None: disable gating.
         """
