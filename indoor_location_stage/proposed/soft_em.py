@@ -21,45 +21,37 @@ class SoftEM_Algorithm:
             features: torch.Tensor, 
             config: Dict[str, Any], 
             reference_grid: torch.Tensor,
-            ap_data_info: Dict[str, Any],
+            ap_data: Dict[str, Any],
             device: torch.device
         ):
         
         self.features = features
         self.config = config
         self.reference_grid = reference_grid
+        self.ap_data = ap_data
         self.device = device
         
         # Unpack AP info
-        self.ap_data = config.get('ACCESS_POINTS', {})
-        self.ap_locations = ap_data_info['locations']
-        self.ap_orientations = ap_data_info['orientations']
+        self.ap_locations = ap_data['locations']
+        self.ap_orientations = ap_data['orientations']
+        self.grid_angle_qg = ap_data['grid_angle_qg']
+        self.grid_delay_qg = ap_data['grid_delay_qg']
         
-        self.num_ap = len(self.ap_data)
+        self.num_ap = len(config['ACCESS_POINTS'])
         self.num_sample = config['NUM_SAMPLE']
         
-        self.G = reference_grid.shape[0]
         self.propagation_params: Optional[TypePropParams] = None
         self.MEPLL_PropParams = -torch.inf
         
         # Pre-calculate neighbor matrix for Forward-Backward
-        G_index = torch.arange(self.G).to(device)
-        self.neighbor_matrix = grid_tools.get_all_neighbor_indices(config, G_index, device)
-
-        # --- Pre-calculate Static Geometry (Lookup Tables) ---
-        # Angle Matrix (Q, G)
-        self.grid_angle_qg = soft_em_utils.calculate_grid_angle_qg(
-            reference_grid, self.ap_locations, self.ap_orientations
-        ).to(device)
-
-        # Distance Matrix (Q, G)
-        self.grid_delay_qg = soft_em_utils.calculate_grid_delay_qg(
-            reference_grid, self.ap_locations
-        ).to(device)
+        nm = ap_data['neighbor_matrix']
+        if not isinstance(nm, torch.Tensor):
+            nm = torch.as_tensor(nm)
+        self.neighbor_matrix = nm.to(device=device, dtype=torch.long)
 
         self.final_emission_log_probs: Optional[torch.Tensor] = None
         self.final_spatiotemporal_probs: Optional[torch.Tensor] = None
-        self.ap_time_gate: Optional[torch.Tensor] = None
+        self.emission_gating: Optional[torch.Tensor] = None
 
         self._debug_epd = None
 
@@ -94,7 +86,7 @@ class SoftEM_Algorithm:
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
-                ap_time_gate=self.ap_time_gate,
+                emission_gating=self.emission_gating,
                 return_debug=True
             )
             self.final_emission_log_probs = emission_log_probs
@@ -138,13 +130,30 @@ class SoftEM_Algorithm:
         
         return max_diff < 1e-4
     
-    def set_ap_time_gate(self, ap_time_gate: Optional[torch.Tensor]):
+    def set_emission_gating(self, emission_gating: Optional[torch.Tensor]) -> None:
         """
-        ap_time_gate: (Q, T) in [0,1] or None
+        emission_gating: (Q, T) in [0,1] or None
+        - None => disable gating (pure physics / equal voting)
         """
-        self.ap_time_gate = ap_time_gate
+        if emission_gating is None:
+            self.emission_gating = None
+            return
 
-    
+        if not isinstance(emission_gating, torch.Tensor):
+            raise TypeError("emission_gating must be a torch.Tensor or None")
+
+        Q, T = self.features.size(0), self.features.size(1)
+        if emission_gating.shape != (Q, T):
+            raise ValueError(
+                f"emission_gating shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(emission_gating.shape)}"
+            )
+
+        eg = emission_gating.to(device=self.device, dtype=torch.float32)
+
+        eg = eg.clamp(0.0, 1.0)
+
+        self.emission_gating = eg
+
     def get_final_epd(self) -> torch.Tensor:
         """ Returns the EPD from the last iteration. """
         if self.final_emission_log_probs is None:

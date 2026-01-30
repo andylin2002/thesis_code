@@ -22,7 +22,7 @@ class HardEM_Algorithm:
             features: torch.Tensor, 
             config: Dict[str, Any], 
             reference_grid: torch.Tensor,
-            ap_data_info: Dict[str, Any], # Received from Estimator
+            ap_data: Dict[str, Any], # Received from Estimator
             device: torch.device
         ):
         
@@ -33,8 +33,8 @@ class HardEM_Algorithm:
         
         # Unpack AP information (Passed from Estimator to avoid re-calculation)
         self.ap_data = config.get('ACCESS_POINTS', {})
-        self.ap_locations = ap_data_info['locations']
-        self.ap_orientations = ap_data_info['orientations']
+        self.ap_locations = ap_data['locations']
+        self.ap_orientations = ap_data['orientations']
 
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']

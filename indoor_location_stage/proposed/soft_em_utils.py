@@ -82,6 +82,177 @@ def calculate_grid_delay_qg(
 
     return grid_delay_qg
 
+def calculate_grid_neighbor_delay_diff_qgk(
+    grid_delay_qg: torch.Tensor, 
+    neighbor_index_matrix: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Returns:
+        grid_neighbor_delay_diff_qgk: (Q, G, K=9)
+        For each current grid g and neighbor slot k (prev g'), compute:
+            delay(q,g) - delay(q,g')
+        Invalid neighbors (-1) are set to 0 by default, and should be masked later if needed.
+    """
+    Q, G = grid_delay_qg.shape
+    G2, K = neighbor_index_matrix.shape
+    assert G2 == G, f"G mismatch: grid_delay_qg has {G}, neighbor_matrix has {G2}"
+    assert K == 9, f"Expected K=9, got K={K}"
+
+    device = grid_delay_qg.device
+    dtype = grid_delay_qg.dtype
+
+    # (G,9) mask
+    valid_mask_g9 = (neighbor_index_matrix != -1)
+
+    # Safe gather index: clamp -1 -> 0 (will be masked)
+    neigh_safe_g9 = neighbor_index_matrix.clamp(min=0)  # (G,9)
+
+    # delay at current g: (Q,G,1)
+    delay_qg1 = grid_delay_qg.unsqueeze(-1)
+
+    # delay at neighbor g' gathered: grid_delay_qg[:, neigh_safe_g9] -> (Q,G,9)
+    # Advanced indexing works: (Q,G) indexed by (G,9) on dim=1 => (Q,G,9)
+    delay_qg9_prev = grid_delay_qg[:, neigh_safe_g9]
+
+    # diff: current - prev
+    diff_qg9 = delay_qg1 - delay_qg9_prev  # (Q,G,9)
+
+    # Mask invalid neighbors: set diff to 0 (or any value; invalid will be ignored in logits anyway)
+    diff_qg9 = torch.where(
+        valid_mask_g9.unsqueeze(0),
+        diff_qg9,
+        torch.zeros((1,), device=device, dtype=dtype),
+    )
+
+    return diff_qg9
+
+# ==========================================
+# 2. Calculate Transition log Probability Distribution (TPD)
+# ==========================================
+
+def calculate_transition_log_probs_tof(
+    features: torch.Tensor,                 # (Q,T,C,5)
+    neighbor_index_matrix: torch.Tensor,    # (G,9)
+    grid_neighbor_delay_diff_qgk: torch.Tensor, 
+    device: torch.device,
+    transition_gating: Optional[torch.Tensor] = None,
+    eps: float = 1e-18,
+) -> torch.Tensor:
+    """
+    ToF-based transition log-probabilities.
+
+    Output:
+        transition_log_probs: (T-1, G, 9)
+
+    transition_gating:
+        - None: physics-only, no gating
+        - (Q, T-1): per-AP per-time reliability gate in [0,1]
+          Applied BEFORE summing over APs:
+              loglik_q *= gate  (safe, keeps loglik sign)
+          (Alternative +log(gate) is also ok, but you chose multiply in spec)
+    """
+    if features.dim() != 4 or features.size(-1) < 5:
+        raise ValueError(f"features must be (Q,T,C,5), got {tuple(features.shape)}")
+
+    Q, T, C, F = features.shape
+    G = int(neighbor_index_matrix.size(0))
+    K = int(neighbor_index_matrix.size(1))
+
+    if T < 2:
+        return torch.empty((0, G, K), device=device, dtype=torch.float32)
+    if K != 9:
+        raise ValueError(f"neighbor_index_matrix must have K=9, got {K}")
+
+    # --- diff table sanity ---
+    if not isinstance(grid_neighbor_delay_diff_qgk, torch.Tensor):
+        grid_neighbor_delay_diff_qgk = torch.as_tensor(grid_neighbor_delay_diff_qgk)
+
+    diff_tbl = grid_neighbor_delay_diff_qgk.to(device=device, dtype=torch.float32)
+    if diff_tbl.shape != (Q, G, K):
+        raise ValueError(
+            f"grid_neighbor_delay_diff_qgk shape mismatch: expected (Q,G,9)=({Q},{G},{K}), got {tuple(diff_tbl.shape)}"
+        )
+
+    # --- neighbor mask ---
+    neighbor_index_matrix = torch.as_tensor(neighbor_index_matrix).to(device=device, dtype=torch.long)
+    valid_mask_gk = (neighbor_index_matrix != -1)
+
+    # --- observed ToF fusion (gain-softmax over candidates) ---
+    tof_cand = features[..., 2].to(device=device, dtype=torch.float32)   # (Q,T,C)
+    gain     = features[..., 4].to(device=device, dtype=torch.float32)   # (Q,T,C)
+
+    gain = gain - gain.max(dim=2, keepdim=True).values
+    weights = torch.softmax(gain, dim=2)                                 # (Q,T,C)
+    tau = torch.sum(weights * tof_cand, dim=2)                           # (Q,T)
+
+    # --- Relative ToF (TDoA) to remove common-mode bias ---
+    ref_q = 0
+    tau_ref = tau[ref_q:ref_q + 1, :]                                    # (1,T)
+    tau_rel = tau - tau_ref                                              # (Q,T)
+    d_tau_obs = tau_rel[:, 1:] - tau_rel[:, :-1]                         # (Q,T-1)
+
+    # --- predicted delta delay in the same relative domain ---
+    # diff_tbl[q,g,k] = delay(q,g) - delay(q,prev)
+    pred = diff_tbl - diff_tbl[ref_q:ref_q + 1, :, :]                    # (Q,G,9)
+
+    # --- robust sigma from MAD of d_tau_obs per AP ---
+    med = torch.median(d_tau_obs, dim=1, keepdim=True).values
+    mad = torch.median(torch.abs(d_tau_obs - med), dim=1, keepdim=True).values
+    sigma_q = 1.4826 * mad
+    sigma_q = torch.clamp(sigma_q, min=1e-12)
+    sigma = sigma_q.expand(Q, T - 1)                                     # (Q,T-1)
+
+    # --- robust likelihood (Cauchy) ---
+    obs  = d_tau_obs[:, :, None, None]                                   # (Q,T-1,1,1)
+    pred = pred[:, None, :, :]                                           # (Q,1,G,9)
+    err  = obs - pred                                                    # (Q,T-1,G,9)
+
+    sigma_b = sigma[:, :, None, None]                                    # (Q,T-1,1,1)
+    r2 = (err / (sigma_b + eps)) ** 2
+    loglik_q = -torch.log1p(r2)                                          # (Q,T-1,G,9)
+
+    # -------------------------------------------------
+    # Apply transition gating (optional)
+    # -------------------------------------------------
+    if transition_gating is not None:
+        if not isinstance(transition_gating, torch.Tensor):
+            raise TypeError("transition_gating must be a torch.Tensor or None")
+
+        tg = transition_gating.to(device=device, dtype=loglik_q.dtype)
+
+        if tg.shape != (Q, T - 1):
+            raise ValueError(
+                f"transition_gating shape mismatch: expected (Q,T-1)=({Q},{T-1}), got {tuple(tg.shape)}"
+            )
+
+        # clamp to [0,1] for safety
+        tg = tg.clamp(0.0, 1.0)
+
+        # broadcast to (Q,T-1,G,9)
+        loglik_q = loglik_q * tg[:, :, None, None]
+
+    # --- sum over APs => logits ---
+    logits_tgk = torch.sum(loglik_q, dim=0)                              # (T-1,G,9)
+
+    # --- mask invalid neighbors and normalize ---
+    neg_inf = torch.tensor(-float("inf"), device=device, dtype=logits_tgk.dtype)
+    logits_tgk = torch.where(valid_mask_gk.unsqueeze(0), logits_tgk, neg_inf)
+
+    # handle pathological rows with no valid neighbors
+    valid_count = valid_mask_gk.sum(dim=1)
+    no_valid = (valid_count == 0)
+    if no_valid.any():
+        logits_tgk = logits_tgk.clone()
+        logits_tgk[:, no_valid, :] = neg_inf
+        logits_tgk[:, no_valid, 4] = 0.0  # stay-put slot
+
+    transition_log_probs = torch.log_softmax(logits_tgk, dim=-1)
+
+    if torch.isnan(transition_log_probs).any():
+        transition_log_probs = torch.nan_to_num(transition_log_probs, neginf=-1e9)
+
+    return transition_log_probs
+
 # ==========================================
 # 2. Calculate Emission log Probability Distribution (EPD)
 # ==========================================
@@ -90,7 +261,7 @@ def calculate_emission_log_probs(
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
     grid_angle_qg: torch.Tensor,
-    ap_time_gate: Optional[torch.Tensor] = None, 
+    emission_gating: Optional[torch.Tensor] = None, 
     return_debug: bool=False
 ) -> torch.Tensor:
     """
@@ -149,29 +320,29 @@ def calculate_emission_log_probs(
     mixed_log_prob = torch.logsumexp(total_log_prob_k, dim=-1)             # (Q, G, T)
 
     # =========================================================
-    # Step 6: Integrate APs (Optional ap_time_gate Gating)
+    # Step 6: Integrate APs (Optional emission_gating)
     # =========================================================
     log_gate_qt = None
     mixed_log_prob_gated = None
 
-    if ap_time_gate is None:
+    if emission_gating is None:
         emission_log_probs_gt = torch.sum(mixed_log_prob, dim=0)           # (G, T)
 
     else:
         # Align Weight dims: [Q, T] -> [Q, 1, T]
-        ap_time_gate = ap_time_gate.to(mixed_log_prob.device).type_as(mixed_log_prob)
+        emission_gating = emission_gating.to(mixed_log_prob.device).type_as(mixed_log_prob)
 
         # Sanity Check
-        if ap_time_gate.shape != (Q, T):
+        if emission_gating.shape != (Q, T):
             raise ValueError(
-                f"ap_time_gate shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(ap_time_gate.shape)}"
+                f"emission_gating shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(emission_gating.shape)}"
             )
 
         # Log-Gating Bias (w=1 -> 0, w=0 -> strong penalty)
         # Note: using eps to avoid -inf and keep numerically stable
         eps = 1e-3
-        ap_time_gate = torch.clamp(ap_time_gate, min=0.0, max=1.0)
-        log_gate_qt = torch.log(ap_time_gate + eps) - math.log(1.0 + eps)   # (Q, T)
+        emission_gating = torch.clamp(emission_gating, min=0.0, max=1.0)
+        log_gate_qt = torch.log(emission_gating + eps) - math.log(1.0 + eps)   # (Q, T)
 
         mixed_log_prob_gated = mixed_log_prob + log_gate_qt.unsqueeze(1)    # (Q, G, T)
         emission_log_probs_gt = torch.sum(mixed_log_prob_gated, dim=0)      # (G, T)
@@ -187,8 +358,8 @@ def calculate_emission_log_probs(
         "gain_qtc": obs_gain_cand,                                          # (Q, T, C)
     }
 
-    if ap_time_gate is not None:
-        debug["ap_time_gate"] = ap_time_gate                                # (Q, T)
+    if emission_gating is not None:
+        debug["emission_gating"] = emission_gating                                # (Q, T)
         debug["log_gate_qt"] = log_gate_qt                                  # (Q, T)
         debug["mixed_log_prob_qgt_gated"] = mixed_log_prob_gated            # (Q, G, T)
 

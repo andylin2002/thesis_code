@@ -2,7 +2,7 @@
 
 import torch
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 from scipy.signal import savgol_filter
 
@@ -10,7 +10,6 @@ from scipy.signal import savgol_filter
 from .soft_em import SoftEM_Algorithm
 from . import soft_em_utils
 from .._common.viterbi import Viterbi_Algorithm
-from .._common import grid_tools
 
 class ProposedEstimator:
     """
@@ -23,14 +22,16 @@ class ProposedEstimator:
         reference_grid: torch.Tensor,
         ap_data: Dict[str, Any],      # Pre-calculated AP info
         device: torch.device,
-        ap_time_gate: Optional[torch.Tensor] = None
+        emission_gating: Optional[torch.Tensor] = None,
+        transition_gating: Optional[torch.Tensor] = None
     ):
         self.features = features
         self.config = config
         self.reference_grid = reference_grid
         self.ap_data = ap_data
         self.device = device
-        self.ap_time_gate = ap_time_gate
+        self.emission_gating = emission_gating
+        self.transition_gating = transition_gating
         
         self.num_sample = config['NUM_SAMPLE']
         self.G = reference_grid.shape[0]
@@ -45,14 +46,14 @@ class ProposedEstimator:
             self.G, self.num_sample, reference_grid, device
         )
 
-        # 3. Pre-calculate Neighbor Matrix
-        G_index = torch.arange(self.G).to(device)
-        self.neighbor_matrix = grid_tools.get_all_neighbor_indices(config, G_index, device)
+        self.neighbor_matrix = ap_data['neighbor_matrix'].to(device)
+        self.grid_neighbor_delay_diff_qgk = ap_data['grid_neighbor_delay_diff_qgk'].to(device)
 
         # State tracking
         self.trajectory = None
         self.epd = None
         self.stpd = None
+        self.tpd = None
 
     def solve(self) -> torch.Tensor:
         """
@@ -66,12 +67,20 @@ class ProposedEstimator:
         # --- Step 1: Physics Parameter Optimization (SoftEM) ---
         # This function runs the internal EM loop until parameters converge.
         # Process: Init -> [Calc EPD -> Calc Gamma -> Update Params] * N -> Converged Parameters
-        self.softem.set_ap_time_gate(self.ap_time_gate)
+        self.softem.set_emission_gating(self.emission_gating)
         self.softem.step_parameters()
         
         # --- Step 2: Retrieve the Calculated EPD & STPD ---
         self.epd = self.softem.get_final_epd()
         self.stpd = self.softem.get_final_stpd()
+
+        self.tpd = soft_em_utils.calculate_transition_log_probs_tof(
+            features=self.features,
+            neighbor_index_matrix=self.neighbor_matrix,
+            grid_neighbor_delay_diff_qgk=self.grid_neighbor_delay_diff_qgk,
+            transition_gating=self.transition_gating, 
+            device=self.device,
+        )
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler
@@ -79,6 +88,7 @@ class ProposedEstimator:
             emission_log_probs=self.epd,
             neighbor_index_matrix=self.neighbor_matrix,
             get_max_previous_score=soft_em_utils.get_max_previous_score,
+            transition_log_probs=self.tpd
         )
 
         self.trajectory = self._apply_physics_smoothing(raw_trajectory)
@@ -95,7 +105,8 @@ class ProposedEstimator:
         # 1. save EPD & STPD
         np.save(os.path.join(debug_dir, "epd.npy"), self.epd.detach().cpu().numpy())
         np.save(os.path.join(debug_dir, "stpd.npy"), self.stpd.detach().cpu().numpy())
-        
+        np.save(os.path.join(debug_dir, "tpd.npy"), self.tpd.detach().cpu().numpy())
+
         # 2. save Grid
         np.save(os.path.join(debug_dir, "grid.npy"), self.reference_grid.detach().cpu().numpy())
         
@@ -104,15 +115,16 @@ class ProposedEstimator:
         np.save(os.path.join(debug_dir, "softem_params.npy"), params_numpy)
 
         # 4. save gating
-        if self.ap_time_gate is not None:
-            np.save(os.path.join(debug_dir, "ap_time_gate.npy"), self.ap_time_gate.detach().cpu().numpy())
-
+        if self.emission_gating is not None:
+            np.save(os.path.join(debug_dir, "emission_gating.npy"), self.emission_gating.detach().cpu().numpy())
+        if self.transition_gating is not None:
+            np.save(os.path.join(debug_dir, "transition_gating.npy"), self.transition_gating.detach().cpu().numpy())
 
         print(f"[Estimator] Debug data saved to {debug_dir}")
         # =========================================================
-
-        dbg = self.softem._debug_epd
-        np.save(os.path.join(debug_dir, "mixed_log_prob_qgt.npy"), dbg["mixed_log_prob_qgt"].detach().cpu().numpy())
+        if hasattr(self.softem, "_debug_epd") and "mixed_log_prob_qgt" in self.softem._debug_epd:
+            dbg = self.softem._debug_epd
+            np.save(os.path.join(debug_dir, "mixed_log_prob_qgt.npy"), dbg["mixed_log_prob_qgt"].detach().cpu().numpy())
 
         return self.trajectory
     

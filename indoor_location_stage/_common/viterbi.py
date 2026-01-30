@@ -20,8 +20,38 @@ class Viterbi_Algorithm:
         self, 
         emission_log_probs: torch.Tensor, 
         neighbor_index_matrix: torch.Tensor,
-        get_max_previous_score: Callable
+        get_max_previous_score: Callable, 
+        transition_log_probs: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        # 0. Basic checks / alignment
+        if emission_log_probs.dim() != 2:
+            raise ValueError(f"emission_log_probs must be (G,T), got {tuple(emission_log_probs.shape)}")
+        if emission_log_probs.size(0) != self.G or emission_log_probs.size(1) != self.T:
+            raise ValueError(
+                f"emission_log_probs shape mismatch: expected (G,T)=({self.G},{self.T}), got {tuple(emission_log_probs.shape)}"
+            )
+        if neighbor_index_matrix.dim() != 2 or neighbor_index_matrix.size(0) != self.G:
+            raise ValueError(
+                f"neighbor_index_matrix must be (G,K), got {tuple(neighbor_index_matrix.shape)}"
+            )
+
+        K = neighbor_index_matrix.size(1)
+
+        use_tpd = transition_log_probs is not None
+        if use_tpd:
+            if transition_log_probs.dim() != 3:
+                raise ValueError(f"transition_log_probs must be 3D, got {transition_log_probs.dim()}D")
+            if transition_log_probs.size(0) != self.T - 1:
+                raise ValueError(
+                    f"transition_log_probs first dim must be T-1={self.T-1}, got {transition_log_probs.size(0)}"
+                )
+            if transition_log_probs.size(1) != self.G or transition_log_probs.size(2) != K:
+                raise ValueError(
+                    f"transition_log_probs shape mismatch: expected (T-1,G,K)=({self.T-1},{self.G},{K}), "
+                    f"got {tuple(transition_log_probs.shape)}"
+                )
+            transition_log_probs = transition_log_probs.to(self.device).type_as(emission_log_probs)
 
         # 1. Initialization (t=0)
         delta = emission_log_probs[:, 0].clone()
@@ -32,14 +62,37 @@ class Viterbi_Algorithm:
         no_valid = ~valid_mask.any(dim=1)                   # (G,)
         row_indices = torch.arange(self.G, device=self.device)
 
+        neigh_safe = neighbor_index_matrix.clamp(min=0)       # (G, K)
+        neg_inf = -float('inf')
+
         # 2. Forward Pass
         for t in range(1, self.T):
             current_emission_log_probs = emission_log_probs[:, t]
 
-            winner_indices, max_prev_path_scores = get_max_previous_score(
-                neighbor_index_matrix, 
-                delta
-            )
+            if not use_tpd:
+                # === Backward-compatible behavior ===
+                winner_indices, max_prev_path_scores = get_max_previous_score(
+                    neighbor_index_matrix,
+                    delta
+                )
+            else:
+                # === New behavior: delta_prev[g'] + transition_log_probs[t-1, g, k] ===
+                # Gather delta_prev at neighbors: (G, K)
+                neigh_prev = delta[neigh_safe]  # (G, K)
+                neigh_prev = torch.where(
+                    valid_mask,
+                    neigh_prev,
+                    torch.full_like(neigh_prev, neg_inf)
+                )
+
+                # Transition log-scores for time step (t-1 -> t): (G, K)
+                tpd_gk = transition_log_probs[t - 1]
+
+                # Combine and take max over k
+                score_gk = neigh_prev + tpd_gk
+                max_prev_path_scores, rel_k = torch.max(score_gk, dim=1)  # (G,), (G,)
+
+                winner_indices = neighbor_index_matrix[row_indices, rel_k]  # (G,)
 
             # =========================================================
             # [GUARD] If a node has no valid neighbors, force self-transition
