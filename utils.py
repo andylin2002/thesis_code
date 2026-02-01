@@ -1,3 +1,5 @@
+# utils.py
+
 import yaml
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
@@ -101,8 +103,7 @@ def generate_reference_grid(
 
 def load_and_preprocess_csi_dataset(
     Hmatrix: str, 
-    config: Dict[str, Any], 
-    device: torch.device
+    config: Dict[str, Any]
 ) -> List[torch.Tensor]:
     
     Q = len(config.get('ACCESS_POINTS', {}))
@@ -116,7 +117,7 @@ def load_and_preprocess_csi_dataset(
     data_storage = {}
     ap_ids_in_dataset = set()
     
-    # 步驟 1: 解析檔名並讀取數據
+    # Step 1: Parse filenames and load CSI data
     for filename in os.listdir(Hmatrix):
         match = filename_pattern.match(filename)
         if match:
@@ -127,7 +128,7 @@ def load_and_preprocess_csi_dataset(
             
             file_path = os.path.join(Hmatrix, filename)
             
-            # 讀取單個子載波的 N 根天線數據 (N_rx,)
+            # Read CSI data of a single subcarrier across N receive antennas (shape: N_rx,)
             H_complex_N = _read_antenna_data_csv(file_path, N)
             
             if H_complex_N is not None:
@@ -138,8 +139,7 @@ def load_and_preprocess_csi_dataset(
                     
                 data_storage[time_stamp][rx_id][inst_id] = H_complex_N
 
-    # 步驟 2: 整理、對齊並聚合 M 維度
-    
+    # Step 2: Align data and aggregate along the subcarrier (M) dimension
     sorted_ap_ids = sorted(list(ap_ids_in_dataset))
     all_time_stamps = sorted(list(data_storage.keys()))
     total_samples = len(all_time_stamps)
@@ -147,24 +147,24 @@ def load_and_preprocess_csi_dataset(
     if total_samples == 0:
         return []
 
-    # 最終的原始數據張量: (Total_Samples, Q_ap, N_rx, M_sub)
+    # Final raw CSI tensor shape: (Total_Samples, Q_ap, N_rx, M_sub)
     raw_csi_tensor = np.zeros((total_samples, Q, N, M), dtype=np.complex64)
     
-    # 假設 Inst ID 是從 1 開始到 M_sub
+    # Assume subcarrier indices range from 1 to M_sub
     subcarrier_indices = list(range(1, M + 1)) 
 
     for i, ts in enumerate(all_time_stamps):
         for j, rx_id in enumerate(sorted_ap_ids):
             ap_data = data_storage[ts].get(rx_id, {})
             
-            # 對於每個子載波 ID (1 到 30) 進行堆疊
+            # Stack data for each subcarrier ID (1 to M)
             for k, inst_id in enumerate(subcarrier_indices):
                 if inst_id in ap_data:
-                    # H_complex_N 的 shape 是 (N_rx,)
+                    # H_complex_N has shape (N_rx,)
                     raw_csi_tensor[i, j, :, k] = ap_data[inst_id] 
-                # 否則保留為 0 (缺失子載波數據)
+                # Otherwise, keep zero (missing subcarrier data)
     
-    # 步驟 3: 切塊與重塑
+    # Step 3: Block segmentation and reshaping
     TP_block_size = T * P
     num_blocks = total_samples // TP_block_size
 
@@ -172,16 +172,17 @@ def load_and_preprocess_csi_dataset(
         print(f"Error: Total samples ({total_samples}) is less than required block size (T*P={TP_block_size}).")
         return []
 
-    # 重塑和軸交換： (Num_Blocks, Q, TP, N, M)
+    # Reshape and permute axes:
+    # (Num_Blocks, Q, TP, N, M)
     trimmed_tensor = raw_csi_tensor[:num_blocks * TP_block_size]
     reshaped_tensor = trimmed_tensor.reshape(num_blocks, TP_block_size, Q, N, M)
     
     # (Num_Blocks, TP, Q, N, M) -> (Num_Blocks, Q, TP, N, M)
     final_tensor = reshaped_tensor.transpose(0, 2, 1, 3, 4)
 
-    # 轉換為 PyTorch 張量列表
+    # Convert to a list of PyTorch tensors (kept on CPU)
     csi_blocks_list = [
-        torch.from_numpy(block).to(torch.complex64).to(device) 
+        torch.from_numpy(block).to(torch.complex64)
         for block in final_tensor
     ]
     
@@ -191,18 +192,19 @@ def load_and_preprocess_csi_dataset(
 
 def _read_antenna_data_csv(file_path: str, N: int) -> Optional[np.ndarray]:
     """
-    讀取單個 CSI CSV 檔案（只包含一個子載波在 N 根天線上的數據），
-    並將其轉換為 (N,) 的複數 NumPy 陣列。
-    
+    Read a single CSI CSV file containing data for one subcarrier
+    across N receive antennas, and convert it into a complex-valued
+    NumPy array of shape (N,).
+
     Args:
-        file_path: CSI CSV 檔案的路徑。
-        N: 預期的接收天線數 (N=3)。
+        file_path: Path to the CSI CSV file.
+        N: Expected number of receive antennas (e.g., N=3).
 
     Returns:
-        np.ndarray: 形狀為 (N,) 的複數陣列，如果失敗則返回 None。
+        np.ndarray: Complex-valued array of shape (N,). Returns None if reading fails.
     """
     try:
-        # 關鍵修改：使用 skiprows=4 忽略所有 4 行註釋/標頭
+        # Key modification: skip the first 4 lines of comments/header
         df = pd.read_csv(
             file_path, 
             skiprows=4,      
@@ -211,24 +213,24 @@ def _read_antenna_data_csv(file_path: str, N: int) -> Optional[np.ndarray]:
             index_col=False
         )
         
-        # 確保只有 4 列數據 (Rx Point, Rx Element, H_Real, H_Imag)
+        # Ensure there are at least 4 columns (Rx Point, Rx Element, H_Real, H_Imag)
         if df.shape[1] < 4:
             print(f"Warning: {file_path} 數據列數不足。")
             return None
         df = df.iloc[:, :4] 
         
-        # 手動指定列名
+        # Manually assign column name
         df.columns = ['Rx Point', 'Rx Element', 'H_Real', 'H_Imag']
         
-        # 數據驗證：總行數應為 N
+        # Data validation: number of rows should match the number of antennas
         if len(df) != N:
             print(f"Warning: {file_path} 數據行數為 {len(df)}，與預期的 {N} 根天線不符。跳過檔案。")
             return None
         
-        # 排序以確保天線順序一致 (1, 2, 3...)
+        # Sort by antenna index to ensure consistent antenna ordering (1, 2, 3, ...)
         df = df.sort_values(by='Rx Element')
 
-        # 計算複數：H = H_Real + j * H_Imag
+        # Construct complex CSI: H = H_real + j * H_imag
         H_complex = (df['H_Real'].values + 1j * df['H_Imag'].values).astype(np.complex64)
         
         return H_complex 
@@ -236,25 +238,6 @@ def _read_antenna_data_csv(file_path: str, N: int) -> Optional[np.ndarray]:
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return None
-    
-def opposite(neighbor_pos: int) -> int:
-    
-    INVERSE_MAP = {
-        0: 8,
-        1: 7,
-        2: 6,
-        3: 5,
-        4: 4,
-        5: 3,
-        6: 2,
-        7: 1,
-        8: 0
-    }
-    
-    if neighbor_pos not in INVERSE_MAP:
-        raise ValueError(f"Invalid neighbor_pos ID: {neighbor_pos}. Must be between 0 and 8.")
-
-    return INVERSE_MAP[neighbor_pos]
 
 def get_history_coords_batch(
     reference_grid: torch.Tensor, 

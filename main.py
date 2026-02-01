@@ -125,8 +125,7 @@ def main():
                 # Load CSI Data
                 csi_blocks = utils.load_and_preprocess_csi_dataset(
                     Hmatrix=hmatrix_path,
-                    config=config,
-                    device=DEVICE
+                    config=config
                 )
 
                 if not csi_blocks:
@@ -149,6 +148,8 @@ def main():
         # Synchronization: Wait for all tasks to complete
         # =========================================================
         print(f"[System] Injection done. Waiting for {total_batches_sent} batches...")
+        queues["data"].join()
+        print("[System] infer_worker finished processing all injected blocks.")
         
         # Loop until we receive exactly the number of batches sent
         while len(all_trajectories) < total_batches_sent:

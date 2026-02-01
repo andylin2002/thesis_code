@@ -71,7 +71,7 @@ class INFER_Worker(BaseWorker):
                 features = self.signal_processor.extract(raw_csi_block)
 
                 # Strategy Execution: Location Estimation
-                trajectory = self.location_estimator.estimate(features)
+                trajectory = self.location_estimator.estimate(features, raw_csi_block)
 
                 pkg = {
                     "trajectory": trajectory,

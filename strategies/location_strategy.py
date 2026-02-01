@@ -31,7 +31,11 @@ class BaselineLocationStrategy(ILocationEstimator):
             )
         }
 
-    def estimate(self, features: torch.Tensor) -> torch.Tensor:
+    def estimate(
+        self, 
+        features: torch.Tensor, 
+        raw_csi_block: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         estimator = BaselineEstimator(
             features=features,
             config=self.config,
@@ -108,7 +112,11 @@ class ProposedLocationStrategy(ILocationEstimator):
     # =========================================================
     # Main estimation
     # =========================================================
-    def estimate(self, features: torch.Tensor) -> torch.Tensor:
+    def estimate(
+        self, 
+        features: torch.Tensor, 
+        raw_csi_block: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Executes the Physics-Aware pipeline
         """
@@ -117,8 +125,8 @@ class ProposedLocationStrategy(ILocationEstimator):
         # Get gating weight
         emission_gating: Optional[torch.Tensor] = None
         transition_gating: Optional[torch.Tensor] = None
-        if self.gating_model is not None:
-            emission_gating, transition_gating = self._inference_gating_model(features)
+        if self.gating_model is not None and raw_csi_block is not None:
+            emission_gating, transition_gating = self._inference_gating_model(raw_csi_block)
         
         # Instantiate the Proposed Estimator
         estimator = ProposedEstimator(
@@ -176,21 +184,19 @@ class ProposedLocationStrategy(ILocationEstimator):
     # Inference
     # =========================================================
     @torch.no_grad()
-    def _inference_gating_model(self, features: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _inference_gating_model(self,raw_csi_block: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         if self.gating_model is None:
             return None, None
 
-        gate_features = self._build_gate_features(features)  # (Q,T,F)
+        model_device = next(self.gating_model.parameters()).device        
+        x = raw_csi_block.to(model_device)
 
-        model_device = next(self.gating_model.parameters()).device
-        gate_features = gate_features.to(model_device, dtype=torch.float32)
-
-        out = self.gating_model(gate_features)
-
+        out = self.gating_model(x)
+        
         emission_gating, transition_gating = self._parse_gating_outputs(
             out=out,
-            Q=features.size(0),
-            T=features.size(1),
+            Q=raw_csi_block.size(0),
+            T=raw_csi_block.size(1),
             device=model_device,
             dtype=torch.float32,
         )
@@ -319,28 +325,4 @@ class ProposedLocationStrategy(ILocationEstimator):
 
         return emission_gating, transition_gating
 
-
-    def _build_gate_features(self, features: torch.Tensor) -> torch.Tensor:
-        """
-        features: (Q,T,C,5)
-        output:   (Q,T,F)
-        """
-        aoa_sprd = features[..., 1]   # (Q,T,C)
-        tof_sprd = features[..., 3]   # (Q,T,C)
-        gain = features[..., 4]       # (Q,T,C)
-
-        aoa_sprd_min = aoa_sprd.min(dim=2).values
-        aoa_sprd_mean = aoa_sprd.mean(dim=2)
-
-        tof_sprd_min = tof_sprd.min(dim=2).values
-        tof_sprd_mean = tof_sprd.mean(dim=2)
-
-        gain_sum = gain.sum(dim=2) + 1e-9
-        gain_norm = gain / gain_sum.unsqueeze(-1)
-        gain_top1 = gain_norm.max(dim=2).values
-
-        return torch.stack(
-            [aoa_sprd_min, aoa_sprd_mean, tof_sprd_min, tof_sprd_mean, gain_top1],
-            dim=-1,
-        )
 
