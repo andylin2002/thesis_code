@@ -7,7 +7,7 @@ import torch
 
 # Import common utilities
 from .._common.preprocessing.aggregation import run_csi_aggregation
-from .._common.extraction.mmp import MMP_Algorithm
+from .._common.extraction.mmp import MMPAlgorithm
 from .._common.extraction import power_extractor, delay_estimator
 
 class BaselineProcessor:
@@ -18,7 +18,7 @@ class BaselineProcessor:
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
-        self.mmp_engine = MMP_Algorithm(config=config)
+        self.mmp_engine = MMPAlgorithm(config=config)
         
         # Cache config parameters
         self.ap_data = config.get('ACCESS_POINTS', {})

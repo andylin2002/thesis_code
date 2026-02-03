@@ -1,18 +1,16 @@
 #main.py
 
 import os
-import time
 import torch
 import argparse
 import scipy.io
 import numpy as np
 from multiprocessing import JoinableQueue, Queue, Event, set_start_method
-from queue import Empty
 
 import utils
 
-from workers.infer_worker import INFER_Worker
-# from workers.adapt_worker import ADAPT_Worker
+from workers.infer_worker import InferWorker
+# from workers.adapt_worker import AdaptWorker
 
 # Configuration
 CONFIG_PATH = 'config.yaml'
@@ -79,9 +77,10 @@ def main():
     # 5. Setup IPC Queues
     # 'data': JoinableQueue allows .join() to wait for task completion
     queues = {
-        'data': JoinableQueue(), 
-        'result': Queue(),       
-        'model': Queue(), 
+        'data_infer': JoinableQueue(), 
+        'data_adapt': JoinableQueue(), 
+        'model': Queue(),  
+        'out': Queue(),       
         'debug': Queue()
     }
     stop_event = Event()
@@ -89,8 +88,8 @@ def main():
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
-    infer_worker = INFER_Worker(
-        name="INFER_Worker",
+    infer_worker = InferWorker(
+        name="InferWorker",
         config=config,
         queues=queues,
         stop_event=stop_event,
@@ -98,8 +97,8 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    # adapt_worker = ADAPT_Worker(
-    #     name="ADAPT_Worker",
+    # adapt_worker = AdaptWorker(
+    #     name="AdaptWorker",
     #     config=config,
     #     queues=queues,
     #     stop_event=stop_event,
@@ -139,7 +138,8 @@ def main():
                 for block in csi_blocks:
                     # Inject Data
                     # Important: Send CPU tensor to avoid CUDA IPC locks
-                    queues['data'].put(block.cpu())
+                    queues['data_infer'].put(block.cpu())
+                    #queues['data_adapt'].put(block.cpu())
 
             if not loop_mode:
                 break
@@ -148,28 +148,31 @@ def main():
         # Synchronization: Wait for all tasks to complete
         # =========================================================
         print(f"[System] Injection done. Waiting for {total_batches_sent} batches...")
-        queues["data"].join()
+        queues['data_infer'].join()
         print("[System] infer_worker finished processing all injected blocks.")
         
         # Loop until we receive exactly the number of batches sent
         while len(all_trajectories) < total_batches_sent:
             try:
-                # Listen to 'save' queue. ADAPT worker listens to 'result'.
-                res_path = queues['debug'].get(timeout=None) 
-                
-                # Convert to Numpy
-                if hasattr(res_path, 'detach'):
-                    res_path = res_path.detach().cpu().numpy()
-                
-                all_trajectories.append(res_path)
-                
-                # Instant Save (Overwrite .npy)
+                payload = queues["out"].get(timeout=None)  # dict from InferWorker
+
+                # Extract trajectory from payload
+                traj = payload["trajectory"]
+
+                # Convert to numpy
+                if hasattr(traj, "detach"):
+                    traj = traj.detach().cpu().numpy()
+                else:
+                    traj = np.asarray(traj)
+
+                all_trajectories.append(traj)
+
                 full_path = np.concatenate(all_trajectories, axis=0)
                 os.makedirs("output", exist_ok=True)
                 np.save("output/predicted_trajectory.npy", full_path)
-                
+
                 print(f"\r[System] Progress: {len(all_trajectories)}/{total_batches_sent} saved.", end="")
-            
+
             except Exception as e:
                 print(f"\n[System] Collection Error: {e}")
                 break

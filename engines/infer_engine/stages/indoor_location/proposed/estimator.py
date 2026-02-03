@@ -1,13 +1,12 @@
 # indoor_location_stage/proposed/estimator.py
 
 import torch
-import numpy as np
 from typing import Dict, Any, Optional
 
 from scipy.signal import savgol_filter
 
 # Import Physics Engine (SoftEM) and Utils
-from .soft_em import SoftEM_Algorithm
+from .soft_em import SoftEMAlgorithm
 from . import soft_em_utils
 from .._common.viterbi import Viterbi_Algorithm
 
@@ -37,7 +36,7 @@ class ProposedEstimator:
         self.G = reference_grid.shape[0]
 
         # 1. Initialize Physics Optimizer (Soft EM)
-        self.softem = SoftEM_Algorithm(
+        self.softem = SoftEMAlgorithm(
             features, config, reference_grid, ap_data, device
         )
 

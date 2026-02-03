@@ -11,7 +11,7 @@ from .._common import grid_tools
 # Type definition for clarity
 TypePropParams = Dict[str, torch.Tensor]
 
-class HardEM_Algorithm:
+class HardEMAlgorithm:
     """
     Parameter Optimizer for the Baseline Method.
     Refactored to focus solely on estimating propagation parameters (E-Step)

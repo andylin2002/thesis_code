@@ -3,11 +3,11 @@
 import torch
 from typing import Optional, Tuple, Union
 from core.interfaces import ILocationEstimator
-from indoor_location_stage._common import grid_tools
-from indoor_location_stage.proposed import soft_em_utils
+from ..stages.indoor_location._common import grid_tools
+from ..stages.indoor_location.proposed import soft_em_utils
 
-from indoor_location_stage.baseline.estimator import BaselineEstimator
-from indoor_location_stage.proposed.estimator import ProposedEstimator
+from ..stages.indoor_location.baseline.estimator import BaselineEstimator
+from ..stages.indoor_location.proposed.estimator import ProposedEstimator
 
 class BaselineLocationStrategy(ILocationEstimator):
     """

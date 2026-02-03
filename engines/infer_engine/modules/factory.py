@@ -1,7 +1,7 @@
 # modules/factory.py
 
-from strategies.analysis_strategy import BaselineAnalysisStrategy, ProposedAnalysisStrategy
-from strategies.location_strategy import BaselineLocationStrategy, ProposedLocationStrategy
+from ..strategies.analysis_strategy import BaselineAnalysisStrategy, ProposedAnalysisStrategy
+from ..strategies.location_strategy import BaselineLocationStrategy, ProposedLocationStrategy
 
 class SystemFactory:
     """

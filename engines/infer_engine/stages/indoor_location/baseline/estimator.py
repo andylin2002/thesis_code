@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from typing import Dict, Any, Optional
 
-from .hard_em import HardEM_Algorithm
+from .hard_em import HardEMAlgorithm
 from . import hard_em_utils
 from .._common.viterbi import Viterbi_Algorithm
 from .._common import grid_tools
@@ -32,7 +32,7 @@ class BaselineEstimator:
         self.G = reference_grid.shape[0]
 
         # 1. Initialize Propagation Parameter Optimizer
-        self.param_optimizer = HardEM_Algorithm(
+        self.param_optimizer = HardEMAlgorithm(
             features, config, reference_grid, ap_data, device
         )
 

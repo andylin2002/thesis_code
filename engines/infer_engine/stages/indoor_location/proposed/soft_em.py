@@ -5,13 +5,11 @@ import numpy as np
 from typing import Dict, Any, Optional
 
 from . import soft_em_utils
-from .._common import grid_tools
-from .._common import math_tools
 
 # Type definition
 TypePropParams = Dict[str, torch.Tensor]
 
-class SoftEM_Algorithm:
+class SoftEMAlgorithm:
     """
     Parameter Optimizer for the Proposed Method.
     Uses Soft Assignments (Forward-Backward) to iteratively refine parameters.

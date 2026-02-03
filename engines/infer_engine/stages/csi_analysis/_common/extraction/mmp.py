@@ -4,7 +4,7 @@ import torch
 from typing import Dict, Any, Tuple
 import math
 
-class MMP_Algorithm:
+class MMPAlgorithm:
     def __init__(self, config: Dict[str, Any]):
         
     ##### --- Parameter Setup ---        

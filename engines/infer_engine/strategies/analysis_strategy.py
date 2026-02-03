@@ -1,10 +1,9 @@
 # strategies/analysis_strategy.py
 
-import torch
 from core.interfaces import ISignalProcessor
 
-from csi_analysis_stage.baseline.processor import BaselineProcessor
-from csi_analysis_stage.proposed.processor import ProposedProcessor
+from ..stages.csi_analysis.baseline.processor import BaselineProcessor
+from ..stages.csi_analysis.proposed.processor import ProposedProcessor
 
 class BaselineAnalysisStrategy(ISignalProcessor):
     """
