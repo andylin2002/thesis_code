@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from engines.adapt_engine.models.csi_encoder import CSIEncoder
+from core.models.csi_encoder import CSIEncoder
 
 
 class TrainStage:

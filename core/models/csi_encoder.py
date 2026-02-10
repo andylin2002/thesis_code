@@ -59,7 +59,6 @@ class CSIEncoder(nn.Module):
             nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
         )
 
         # Deep Feature Extraction (The "Brain")
