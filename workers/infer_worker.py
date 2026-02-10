@@ -2,6 +2,7 @@
 
 from queue import Empty
 
+import utils
 from core.interfaces import BaseWorker
 from engines.infer_engine.runtime import InferRuntime
 
@@ -38,6 +39,8 @@ class InferWorker(BaseWorker):
         out_queue = self.queues["out"]                     # Output to main
         debug_queue = self.queues.get("debug", None)       # Optional debug
 
+        TIME = self.config.get("TIME", False)
+
         while not self.stop_event.is_set():
             try:
                 raw_csi_block = in_queue.get(timeout=0.1)
@@ -46,7 +49,11 @@ class InferWorker(BaseWorker):
 
             try:
                 # One step inference (returns CPU-safe dict)
-                pkg_cpu = self.runtime.step(raw_csi_block)
+                if TIME:
+                    with utils.Timer(f"{self.name} Inference"):
+                        pkg_cpu = self.runtime.step(raw_csi_block)
+                else:
+                    pkg_cpu = self.runtime.step(raw_csi_block)
 
                 # Always send main output
                 out_queue.put(pkg_cpu)

@@ -140,6 +140,11 @@ class ProposedLocationStrategy(ILocationEstimator):
         )
 
         trajectory = estimator.solve()
+
+        # DEBUG OUTPUT
+        self.epd = getattr(estimator, 'epd', None)
+        self.stpd = getattr(estimator, 'stpd', None)
+        self.tpd = getattr(estimator, 'tpd', None)
             
         return trajectory
 

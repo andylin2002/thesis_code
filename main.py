@@ -10,7 +10,7 @@ from multiprocessing import JoinableQueue, Queue, Event, set_start_method
 import utils
 
 from workers.infer_worker import InferWorker
-# from workers.adapt_worker import AdaptWorker
+from workers.adapt_worker import AdaptWorker
 
 # Configuration
 CONFIG_PATH = 'config.yaml'
@@ -54,7 +54,16 @@ def main():
     config['ROUND'] = args.round
     
     # Generate Reference Grid
-    reference_grid, x_bounds, y_bounds, x_width, y_width = utils.generate_reference_grid(config)
+    x_bounds = config.get("X_BOUNDS")
+    y_bounds = config.get("Y_BOUNDS")
+
+    reference_grid, x_bounds, y_bounds, x_width, y_width = \
+    utils.generate_reference_grid(
+        config,
+        x_bounds=x_bounds,
+        y_bounds=y_bounds
+    )
+
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
     config['X_WIDTH'] = x_width
@@ -72,7 +81,14 @@ def main():
     # Prepare Checkpoint
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     scene_name = config.get('SCENARIO_NAME', 'Untitled_Scene')
+    hmatrix_list = config.get('HMATRIX_LIST', [])
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"{scene_name}.ckpt")
+
+    # DEBUG OUTPUT
+    grid_np = utils.to_numpy(reference_grid)
+    if grid_np is not None:
+        np.save("output/grid.npy", grid_np)
+        print(f"[IO] Reference Grid saved. Shape: {grid_np.shape}")
 
     # 5. Setup IPC Queues
     # 'data': JoinableQueue allows .join() to wait for task completion
@@ -97,22 +113,22 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    # adapt_worker = AdaptWorker(
-    #     name="AdaptWorker",
-    #     config=config,
-    #     queues=queues,
-    #     stop_event=stop_event,
-    #     directions_vectors=directions_vectors,
-    #     checkpoint_path=ckpt_path
-    # )
+    adapt_worker = AdaptWorker(
+        name="AdaptWorker",
+        config=config,
+        queues=queues,
+        stop_event=stop_event
+    )
 
     # 7. Start Processes
     infer_worker.start()
-    # adapt_worker.start()
+    adapt_worker.start()
 
     # 8. Main Loop
-    hmatrix_list = config.get('HMATRIX_LIST', [])
     all_trajectories = [] 
+    all_epds = []
+    all_stpds = []
+    all_tpds = []
 
     total_batches_sent = 0
     try:
@@ -139,7 +155,7 @@ def main():
                     # Inject Data
                     # Important: Send CPU tensor to avoid CUDA IPC locks
                     queues['data_infer'].put(block.cpu())
-                    #queues['data_adapt'].put(block.cpu())
+                    queues['data_adapt'].put(block.cpu())
 
             if not loop_mode:
                 break
@@ -148,34 +164,81 @@ def main():
         # Synchronization: Wait for all tasks to complete
         # =========================================================
         print(f"[System] Injection done. Waiting for {total_batches_sent} batches...")
-        queues['data_infer'].join()
-        print("[System] infer_worker finished processing all injected blocks.")
         
         # Loop until we receive exactly the number of batches sent
-        while len(all_trajectories) < total_batches_sent:
+        received_count = 0
+        while received_count < total_batches_sent:
             try:
                 payload = queues["out"].get(timeout=None)  # dict from InferWorker
+                received_count += 1
 
-                # Extract trajectory from payload
-                traj = payload["trajectory"]
+                # 1. Collect Trajectory
+                traj = utils.to_numpy(payload.get("trajectory"))
+                if traj is not None:
+                    all_trajectories.append(traj)
 
-                # Convert to numpy
-                if hasattr(traj, "detach"):
-                    traj = traj.detach().cpu().numpy()
-                else:
-                    traj = np.asarray(traj)
+                # 2. Collect EPD
+                epd = utils.to_numpy(payload.get("epd"))
+                if epd is not None:
+                    all_epds.append(epd)
 
-                all_trajectories.append(traj)
+                # 3. Collect STPD
+                stpd = utils.to_numpy(payload.get("stpd"))
+                if stpd is not None:
+                    all_stpds.append(stpd)
 
-                full_path = np.concatenate(all_trajectories, axis=0)
-                os.makedirs("output", exist_ok=True)
-                np.save("output/predicted_trajectory.npy", full_path)
+                # 4. Collect TPD
+                tpd = utils.to_numpy(payload.get("tpd"))
+                if tpd is not None:
+                    all_tpds.append(tpd)
 
-                print(f"\r[System] Progress: {len(all_trajectories)}/{total_batches_sent} saved.", end="")
+                print(f"[System] Progress: {len(all_trajectories)}/{total_batches_sent} saved.", flush=True)
+
+            except Queue.Empty:
+                continue
 
             except Exception as e:
                 print(f"\n[System] Collection Error: {e}")
                 break
+
+        queues['data_infer'].join()
+        print("[System] InferWorker tasks cleared.")
+
+        queues['data_adapt'].join()
+        print("[System] AdaptWorker tasks cleared.")
+
+        # Save Trajectory
+        if all_trajectories:
+            full_path = np.concatenate(all_trajectories, axis=0)
+            np.save("output/predicted_trajectory.npy", full_path)
+            print(f"[IO] Trajectory saved. Shape: {full_path.shape}")
+
+        # Save EPD
+        if all_epds:
+            try:
+                full_epd = np.concatenate(all_epds, axis=1)
+                np.save("output/epd.npy", full_epd)
+                print(f"[IO] EPD saved. Shape: {full_epd.shape}")
+            except ValueError as e:
+                print(f"[IO] Error merging EPD: {e}")
+
+        # Save STPD
+        if all_stpds:
+            try:
+                full_stpd = np.concatenate(all_stpds, axis=1)
+                np.save("output/stpd.npy", full_stpd)
+                print(f"[IO] STPD saved. Shape: {full_stpd.shape}")
+            except ValueError as e:
+                print(f"[IO] Error merging STPD: {e}")
+
+        # Save TPD
+        if all_tpds:
+            try:
+                full_tpd = np.concatenate(all_tpds, axis=0)
+                np.save("output/tpd.npy", full_tpd)
+                print(f"[IO] TPD saved. Shape: {full_tpd.shape}")
+            except ValueError as e:
+                print(f"[IO] Error merging TPD: {e}")
 
         print("\n[System] All tasks processed.")
 
@@ -186,12 +249,15 @@ def main():
         # 9. Graceful Shutdown
         print("[System] Shutting down workers...")
         stop_event.set()
-        
-        # adapt_worker.join(timeout=2)
-        infer_worker.join(timeout=2)
 
-        # if adapt_worker.is_alive(): adapt_worker.terminate()
+        while not queues['out'].empty(): queues['out'].get()
+        while not queues['model'].empty(): queues['model'].get()
+        
+        infer_worker.join(timeout=2)
+        adapt_worker.join(timeout=2)
+
         if infer_worker.is_alive(): infer_worker.terminate()
+        if adapt_worker.is_alive(): adapt_worker.terminate()
         
         print("[System] Shutdown complete.")
 

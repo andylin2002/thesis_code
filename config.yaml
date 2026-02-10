@@ -3,12 +3,15 @@
 ### --- LOOP --- ###
 LOOP: False
 
+### --- TIME --- ###
+TIME: False
+
 ### --- System Mode --- ###
 #SYSTEM_MODE: 'BASELINE'
 SYSTEM_MODE: 'PROPOSED'
 
 ### --- Environment & Trajectory --- ###
-DATASET_FOLDER: "dataset_office"
+DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST:
   - "Hmatrix_1"
@@ -28,10 +31,16 @@ CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
 ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 42                           # notation: T
+NUM_SAMPLE: 20                           # notation: T
 NUM_PACKET: 1                          # notation: P
 
-### --- 3. Controller Setup --- ###
-MIN_TRAJ_TO_TRAIN: 20000
-BATCH_SIZE: 10
-TRAINING_EPOCHS: 50
+### --- 3. Adapt_worker Setup --- ###
+ADAPT_SLEEP: 0.05
+ADAPT_BATCH_SIZE: 5
+ADAPT_UPDATE_INTERVAL: 1
+ADAPT_SAVE_INTERVAL: 1
+ADAPT_MIN_UPDATES: 0
+
+ADAPT_LR: 1e-3
+ADAPT_EMBED_DIM: 16
+ADAPT_TRIPLET_MARGIN: 1.0

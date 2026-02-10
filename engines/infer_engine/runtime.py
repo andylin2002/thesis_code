@@ -64,13 +64,18 @@ class InferRuntime:
         # Stage 2: Location Estimation
         trajectory = self.location_estimator.estimate(features, raw_csi_block)
 
+        # DEBUG OUTPUT
+        epd = getattr(self.location_estimator, "epd", None)
+        stpd = getattr(self.location_estimator, "stpd", None)
+        tpd = getattr(self.location_estimator, "tpd", None)
+
         # Package (future-proof: dict payload)
         pkg = {
-            "type": "traj_batch",
             "trajectory": trajectory,
-            "training": {
-                "features": features,
-            },
+            "epd": epd, 
+            "stpd": stpd, 
+            "tpd": tpd, 
+            "features": features,
         }
 
         # Convert to CPU-safe package

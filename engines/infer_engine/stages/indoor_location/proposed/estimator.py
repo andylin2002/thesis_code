@@ -92,39 +92,6 @@ class ProposedEstimator:
 
         self.trajectory = self._apply_physics_smoothing(raw_trajectory)
 
-        # =========================================================
-        # [SAVE FOR ANALYSIS]
-        # =========================================================
-        import os
-        import numpy as np
-        
-        debug_dir = "output/debug"
-        os.makedirs(debug_dir, exist_ok=True)
-        
-        # 1. save EPD & STPD
-        np.save(os.path.join(debug_dir, "epd.npy"), self.epd.detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "stpd.npy"), self.stpd.detach().cpu().numpy())
-        np.save(os.path.join(debug_dir, "tpd.npy"), self.tpd.detach().cpu().numpy())
-
-        # 2. save Grid
-        np.save(os.path.join(debug_dir, "grid.npy"), self.reference_grid.detach().cpu().numpy())
-        
-        # 3. save SoftEM params
-        params_numpy = {k: v.detach().cpu().numpy() for k, v in self.softem.propagation_params.items()}
-        np.save(os.path.join(debug_dir, "softem_params.npy"), params_numpy)
-
-        # 4. save gating
-        if self.emission_gating is not None:
-            np.save(os.path.join(debug_dir, "emission_gating.npy"), self.emission_gating.detach().cpu().numpy())
-        if self.transition_gating is not None:
-            np.save(os.path.join(debug_dir, "transition_gating.npy"), self.transition_gating.detach().cpu().numpy())
-
-        print(f"[Estimator] Debug data saved to {debug_dir}")
-        # =========================================================
-        if hasattr(self.softem, "_debug_epd") and "mixed_log_prob_qgt" in self.softem._debug_epd:
-            dbg = self.softem._debug_epd
-            np.save(os.path.join(debug_dir, "mixed_log_prob_qgt.npy"), dbg["mixed_log_prob_qgt"].detach().cpu().numpy())
-
         return self.trajectory
     
     def _apply_physics_smoothing(self, raw_coords: torch.Tensor) -> torch.Tensor:

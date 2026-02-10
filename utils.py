@@ -9,6 +9,12 @@ import pandas as pd
 import os
 import re
 
+def to_numpy(data):
+    """Helper: Convert Tensor/List to Numpy safely."""
+    if data is None: return None
+    if hasattr(data, "detach"): return data.detach().cpu().numpy()
+    return np.asarray(data)
+
 def load_yaml_config(file_path: str) -> Dict[str, Any]:
     """
     Loads configuration content from a YAML file.
@@ -29,8 +35,10 @@ def round_to_half(value: float) -> float:
     return round(value * 2) / 2
 
 def generate_reference_grid(
-        config: Dict[str, Any], 
-    ) -> Tuple[torch.Tensor, List[float], List[float]]:
+    config: Dict[str, Any],
+    x_bounds: list | None = None,
+    y_bounds: list | None = None
+) -> Tuple[torch.Tensor, list, list, int, int]:
     """
     Calculates the boundary of the localization area and generates
     a uniform grid of prediction points based on AP locations.
@@ -55,16 +63,22 @@ def generate_reference_grid(
     buffer = config.get("BUFFER_DISTANCE_M")
 
     # 3. Determine Boundary Limits (AP extremes)
-    x_min_ap = np.min(ap_locations_array[:, 0])
-    x_max_ap = np.max(ap_locations_array[:, 0])
-    y_min_ap = np.min(ap_locations_array[:, 1])
-    y_max_ap = np.max(ap_locations_array[:, 1])
+    if x_bounds is not None and y_bounds is not None:
+        # --- Use externally provided bounds ---
+        x_min, x_max = x_bounds
+        y_min, y_max = y_bounds
 
-    # Apply buffer distance (Final Localization Area)
-    x_min = x_min_ap - buffer
-    x_max = x_max_ap + buffer
-    y_min = y_min_ap - buffer
-    y_max = y_max_ap + buffer
+    else:
+        # --- Infer bounds from AP locations ---
+        x_min_ap = np.min(ap_locations_array[:, 0])
+        x_max_ap = np.max(ap_locations_array[:, 0])
+        y_min_ap = np.min(ap_locations_array[:, 1])
+        y_max_ap = np.max(ap_locations_array[:, 1])
+
+        x_min = x_min_ap - buffer
+        x_max = x_max_ap + buffer
+        y_min = y_min_ap - buffer
+        y_max = y_max_ap + buffer
 
     x_min_fixed = round_to_half(x_min)
     y_min_fixed = round_to_half(y_min)
@@ -270,5 +284,31 @@ def get_history_coords_batch(
     history_coords[valid_mask] = coords_flat
     
     return history_coords
+
+# utils.py
+
+import time
+
+class Timer:
+    """
+    Usage:
+        with utils.Timer("Infer Step"):
+            # target
+            result = model(data)
+    
+    Output:
+        [Infer Step] *.* ms
+    """
+    def __init__(self, name="Timer", flush=True):
+        self.name = name
+        self.flush = flush
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        dt_ms = (time.perf_counter() - self.start) * 1000
+        print(f"[{self.name}] {dt_ms:.2f} ms", flush=self.flush)
 
 
