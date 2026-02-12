@@ -2,8 +2,8 @@
 
 from core.interfaces import IProcessor
 
-from ..stages.processing.baseline.processor import BaselineProcessor
-from ..stages.processing.proposed.processor import ProposedProcessor
+from ..stages.signal_processing.baseline.processor import BaselineProcessor
+from ..stages.signal_processing.proposed.processor import ProposedProcessor
 
 class BaselineProcessorStrategy(IProcessor):
     """

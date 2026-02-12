@@ -3,11 +3,12 @@
 import torch
 from typing import Optional, Tuple, Union
 from core.interfaces import IEstimator
-from ..stages.estimation._common import grid_tools
-from ..stages.estimation.proposed import soft_em_utils
+from ..stages.result_estimation._common import grid_tools
+from ..stages.result_estimation.proposed import soft_em_utils
 
-from ..stages.estimation.baseline.estimator import BaselineEstimator
-from ..stages.estimation.proposed.estimator import ProposedEstimator
+from ..stages.gating_evaluation.evaluator import GatingEvaluator
+from ..stages.result_estimation.baseline.estimator import BaselineEstimator
+from ..stages.result_estimation.proposed.estimator import ProposedEstimator
 
 class BaselineEstimatorStrategy(IEstimator):
     """
@@ -58,8 +59,7 @@ class ProposedEstimatorStrategy(IEstimator):
         self.reference_grid = reference_grid
         self.directions_vectors = directions_vectors
 
-        self.gating_model: Optional[torch.nn.Module] = None
-        self._pending_gating_state_dict: Optional[dict] = None
+        self.gating_evaluator = GatingEvaluator(config, device)
 
         # Pre-calculate AP info ONCE during initialization
         self.num_ap = len(config['ACCESS_POINTS'])
@@ -101,13 +101,14 @@ class ProposedEstimatorStrategy(IEstimator):
     # =========================================================
     def set_gating_state_dict(self, state_dict: Optional[dict]) -> None:
         """
-        INFER_Worker will call this when it receives a new model update from queues['model'].
-        - state_dict is stored and will be applied lazily.
-        - if state_dict is None: disable gating.
+        Updates the AI model weights on-the-fly (e.g., from adapt_worker).
         """
-        self._pending_gating_state_dict = state_dict
-        if state_dict is None:
-            self.gating_model = None
+        if state_dict is not None and self.gating_evaluator.model is not None:
+            try:
+                self.gating_evaluator.model.load_state_dict(state_dict, strict=False)
+                print("[ProposedStrategy] Gating model updated.")
+            except Exception as e:
+                print(f"[ProposedStrategy] Model update failed: {e}")
 
     # =========================================================
     # Main estimation
@@ -118,15 +119,19 @@ class ProposedEstimatorStrategy(IEstimator):
         raw_csi_block: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Executes the Physics-Aware pipeline
+        Pipeline: 
+        1. AI Evaluation -> Get Weights
+        2. Physics Estimation -> Use Weights -> Get Trajectory
         """
-        self._ensure_gating_model_ready()
-
         # Get gating weight
         emission_gating: Optional[torch.Tensor] = None
         transition_gating: Optional[torch.Tensor] = None
-        if self.gating_model is not None and raw_csi_block is not None:
-            emission_gating, transition_gating = self._inference_gating_model(raw_csi_block)
+
+        if raw_csi_block is not None:
+            try:
+                emission_gating, transition_gating = self.gating_evaluator.evaluate(raw_csi_block)
+            except Exception as e:
+                print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
         
         # Instantiate the Proposed Estimator
         estimator = ProposedEstimator(
@@ -147,187 +152,3 @@ class ProposedEstimatorStrategy(IEstimator):
         self.tpd = getattr(estimator, 'tpd', None)
             
         return trajectory
-
-    # =========================================================
-    # Internal: lazy build/load gating model
-    # =========================================================
-    def _ensure_gating_model_ready(self) -> None:
-        """
-        Lazy init/load:
-        - If no pending state_dict -> do nothing (pure physics path)
-        - If pending state_dict exists -> build model (if needed) + load + eval
-        """
-        if self._pending_gating_state_dict is None:
-            return
-
-        state_dict = self._pending_gating_state_dict
-        self._pending_gating_state_dict = None  # consume once
-
-        if state_dict is None:
-            self.gating_model = None
-            return
-
-        if self.gating_model is None:
-            self.gating_model = self._build_gating_model().to(self.device)
-
-        self.gating_model.load_state_dict(state_dict)
-        self.gating_model.eval()
-
-    def _build_gating_model(self) -> torch.nn.Module:
-        """
-        IMPORTANT:
-        You haven't provided the MLP model definition yet.
-        Keep this as a hook. When you implement mlp_worker, define the same model here.
-        """
-        raise NotImplementedError(
-            "[ProposedLocationStrategy] gating model is not implemented yet. "
-            "Pure physics path is OK. If you start sending state_dict, "
-            "please implement _build_gating_model() with the correct architecture."
-        )
-
-    # =========================================================
-    # Inference
-    # =========================================================
-    @torch.no_grad()
-    def _inference_gating_model(self,raw_csi_block: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        if self.gating_model is None:
-            return None, None
-
-        model_device = next(self.gating_model.parameters()).device        
-        x = raw_csi_block.to(model_device)
-
-        out = self.gating_model(x)
-        
-        emission_gating, transition_gating = self._parse_gating_outputs(
-            out=out,
-            Q=raw_csi_block.size(0),
-            T=raw_csi_block.size(1),
-            device=model_device,
-            dtype=torch.float32,
-        )
-
-        if emission_gating is not None:
-            emission_gating = emission_gating.clamp(0.0, 1.0).to(self.device)
-
-        if transition_gating is not None:
-            transition_gating = transition_gating.clamp(0.0, 1.0).to(self.device)
-
-        return emission_gating, transition_gating
-
-
-    def _parse_gating_outputs(
-        self,
-        out: Union[
-            None,
-            torch.Tensor,
-            Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]
-        ],
-        Q: int,
-        T: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Normalize gating model outputs into:
-        emission_gating: Optional[Tensor] with shape (Q, T) or None
-        transition_gating: Optional[Tensor] with shape (Q, T-1) or None
-
-        Supports:
-        - None -> (None, None)
-        - tuple (eg, tg) where each can be Tensor or None
-        - single tensor:
-            (Q,T,2) -> eg=x[...,0], tg=x[...,1] (tg trimmed to (Q,T-1))
-            (Q,T,1) -> eg only, tg=None
-            (Q,T)   -> eg only, tg=None
-
-        HARD GUARANTEE:
-        - emission_gating is either None or shape == (Q, T)
-        - transition_gating is either None or shape == (Q, T-1)
-        """
-
-        # -------------------------
-        # Case: out is None
-        # -------------------------
-        if out is None:
-            return None, None
-
-        emission_gating: Optional[torch.Tensor] = None
-        transition_gating: Optional[torch.Tensor] = None
-
-        # -------------------------
-        # Case: tuple output (ALLOW None in either slot)
-        # -------------------------
-        if isinstance(out, tuple):
-            if len(out) != 2:
-                raise ValueError(f"gating_model tuple output must have 2 elements, got {len(out)}")
-
-            eg, tg = out
-
-            if eg is not None and not isinstance(eg, torch.Tensor):
-                raise TypeError("emission_gating in tuple must be a torch.Tensor or None")
-            if tg is not None and not isinstance(tg, torch.Tensor):
-                raise TypeError("transition_gating in tuple must be a torch.Tensor or None")
-
-            emission_gating, transition_gating = eg, tg
-
-        # -------------------------
-        # Case: tensor output
-        # -------------------------
-        else:
-            if not isinstance(out, torch.Tensor):
-                raise TypeError("gating_model output must be a torch.Tensor, a tuple, or None")
-
-            x = out.to(device=device, dtype=dtype)
-
-            if x.dim() == 2:
-                # (Q,T) => emission only
-                emission_gating = x
-                transition_gating = None
-
-            elif x.dim() == 3 and x.size(-1) == 1:
-                # (Q,T,1) => emission only
-                emission_gating = x.squeeze(-1)
-                transition_gating = None
-
-            elif x.dim() == 3 and x.size(-1) == 2:
-                # (Q,T,2) => both (transition given as (Q,T) then trim)
-                emission_gating = x[..., 0]
-                transition_gating = x[..., 1]
-            else:
-                raise ValueError(f"Unsupported gating tensor output shape: {tuple(x.shape)}")
-
-        # -------------------------
-        # Normalize emission_gating -> (Q,T) or None
-        # -------------------------
-        if emission_gating is not None:
-            emission_gating = emission_gating.to(device=device, dtype=dtype)
-
-            if emission_gating.dim() == 3 and emission_gating.size(-1) == 1:
-                emission_gating = emission_gating.squeeze(-1)
-
-            if emission_gating.shape != (Q, T):
-                raise ValueError(
-                    f"emission_gating shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(emission_gating.shape)}"
-                )
-
-        # -------------------------
-        # Normalize transition_gating -> (Q,T-1) or None
-        # -------------------------
-        if transition_gating is not None:
-            transition_gating = transition_gating.to(device=device, dtype=dtype)
-
-            if transition_gating.dim() == 3 and transition_gating.size(-1) == 1:
-                transition_gating = transition_gating.squeeze(-1)
-
-            # If model returns (Q,T), trim to (Q,T-1)
-            if transition_gating.shape == (Q, T):
-                transition_gating = transition_gating[:, :-1]
-
-            if transition_gating.shape != (Q, T - 1):
-                raise ValueError(
-                    f"transition_gating shape mismatch: expected (Q,T-1)=({Q},{T-1}), got {tuple(transition_gating.shape)}"
-                )
-
-        return emission_gating, transition_gating
-
-
