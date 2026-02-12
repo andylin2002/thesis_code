@@ -9,10 +9,10 @@ import torch.nn.functional as F
 
 class RepresentStage:
     """
-    RepresentStage (Layer 0): Geometry-Preserving CSI Representation.
-
-    Input Shape:  (B, Q, T, N, M)  <- N=Antennas, M=Subcarriers
-    Output Shape: (B, Channels, M) <- Preserves Subcarrier axis for 1D-CNN
+    RepresentStage (Layer 0): Preprocessing for Shared Encoder.
+    
+    Transforms (B, Q, T, N, M) -> (B*Q*T, N*2, M)
+    This allows the ResNet to learn a unified topology space for any AP.
     """
 
     def __init__(self, config: Dict[str, Any], device: torch.device):
@@ -21,34 +21,39 @@ class RepresentStage:
 
     def process(self, raw_csi: torch.Tensor) -> torch.Tensor:
         """
-        Transforms raw complex CSI into hardware-invariant features.
+        Input:  (B, Q, T, N, M)
+        Output: (Total_Samples, Channels, Length) = (B*Q*T, N*2, M)
         """
         # Ensure data is on GPU
         if raw_csi.device != self.device:
             raw_csi = raw_csi.to(self.device, non_blocking=True)
 
-        # 1. Log-Magnitude Feature
-        # |H| -> log10(|H|), Shape: (B, Q, T, N, M)
+        # 1. Log-Magnitude Feature (Signal Strength)
+        # Shape: (B, Q, T, N, M)
         mag = raw_csi.abs()
         log_mag = torch.log10(mag + self.eps)
 
-        # 2. Differential Phase Feature (SFO Removal)
-        # Calculate diff along Subcarrier axis (dim=-1) to remove linear SFO
+        # 2. Diff-Phase Feature (SFO Removal)
+        # Shape: (B, Q, T, N, M)
         phase = raw_csi.angle()
         diff_phase = torch.diff(phase, dim=-1, prepend=phase[..., 0:1])
 
-        # 3. Stack & Flatten
-        # Stack features: (B, Q, T, N, M, 2)
-        features_stacked = torch.stack([log_mag, diff_phase], dim=-1)
+        # 3. Stack Features
+        # Shape: (B, Q, T, N, M, 2)
+        x = torch.stack([log_mag, diff_phase], dim=-1)
 
-        # Permute to move M (Subcarriers) to the end: (B, Q, T, N, 2, M)
-        features_permuted = features_stacked.permute(0, 1, 2, 3, 5, 4)
+        # 4. Reshape for 1D-CNN Shared Encoder
+        B, Q, T, N, M, _ = x.shape
 
-        # Flatten Q, T, N, 2 into 'Channels'
-        B = features_permuted.shape[0]
-        M_sub = features_permuted.shape[-1]
-        features_flat = features_permuted.reshape(B, -1, M_sub)
+        # Permute: Move M to end (Length), N & 2 to middle
+        # (B, Q, T, N, M, 2) -> (B, Q, T, N, 2, M)
+        x = x.permute(0, 1, 2, 3, 5, 4)
 
-        # 4. Instance Normalization
-        # Normalize per instance, per channel to focus on shape
-        return F.instance_norm(features_flat)
+        # Flatten B, Q, T into Batch dim (Independent Samples)
+        # Flatten N, 2 into Channel dim (Spatial/Feature info)
+        # Final Shape: (B*Q*T, N*2, M)
+        x_flat = x.reshape(B * Q * T, N * 2, M)
+
+        # 5. Instance Normalization
+        # Normalizes each AP/Time instance independently
+        return F.instance_norm(x_flat)

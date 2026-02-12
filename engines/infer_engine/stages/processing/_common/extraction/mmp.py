@@ -1,4 +1,4 @@
-# csi_analysis_stage/_common/extraction/mmp.py
+# engines/infer_engine/stages/processing/_common/extraction/mmp.py
 
 import torch
 from typing import Dict, Any, Tuple

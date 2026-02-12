@@ -285,8 +285,6 @@ def get_history_coords_batch(
     
     return history_coords
 
-# utils.py
-
 import time
 
 class Timer:

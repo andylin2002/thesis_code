@@ -1,4 +1,4 @@
-# indoor_location_stage/baseline/estimator.py
+# engines/infer_engine/stages/estimation/baseline/estimator.py
 
 import torch
 import numpy as np

@@ -1,4 +1,4 @@
-# indoor_location_stage/baseline/hard_em_utils.py
+# engines/infer_engine/stages/estimation/baseline/hard_em_utils.py
 
 import torch
 import numpy as np

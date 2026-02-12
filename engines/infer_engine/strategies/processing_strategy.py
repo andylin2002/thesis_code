@@ -1,11 +1,11 @@
-# strategies/analysis_strategy.py
+# engines/infer_engine/strategies/processing_strategy.py
 
-from core.interfaces import ISignalProcessor
+from core.interfaces import IProcessor
 
-from ..stages.csi_analysis.baseline.processor import BaselineProcessor
-from ..stages.csi_analysis.proposed.processor import ProposedProcessor
+from ..stages.processing.baseline.processor import BaselineProcessor
+from ..stages.processing.proposed.processor import ProposedProcessor
 
-class BaselineAnalysisStrategy(ISignalProcessor):
+class BaselineProcessorStrategy(IProcessor):
     """
     Strategy for Baseline signal processing.
     """
@@ -27,7 +27,7 @@ class BaselineAnalysisStrategy(ISignalProcessor):
         
         return features
 
-class ProposedAnalysisStrategy(ISignalProcessor):
+class ProposedProcessorStrategy(IProcessor):
     """
     Strategy for Proposed signal processing (MMP + SPD).
     """

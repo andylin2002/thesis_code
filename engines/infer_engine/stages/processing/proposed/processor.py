@@ -1,4 +1,4 @@
-# csi_analysis_stage/proposed/processor.py
+# engines/infer_engine/stages/processing/proposed/processor.py
 
 import numpy as np
 from typing import Dict, Any, Optional

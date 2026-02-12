@@ -1,7 +1,7 @@
-# modules/factory.py
+# engines/infer_engine/modules/factory.py
 
-from ..strategies.analysis_strategy import BaselineAnalysisStrategy, ProposedAnalysisStrategy
-from ..strategies.location_strategy import BaselineLocationStrategy, ProposedLocationStrategy
+from ..strategies.processing_strategy import BaselineProcessorStrategy, ProposedProcessorStrategy
+from ..strategies.estimation_strategy import BaselineEstimatorStrategy, ProposedEstimatorStrategy
 
 class SystemFactory:
     """
@@ -16,10 +16,10 @@ class SystemFactory:
         mode = config.get('SYSTEM_MODE', 'BASELINE').upper()
         
         if mode == 'BASELINE':
-            return BaselineAnalysisStrategy(config, device)
+            return BaselineProcessorStrategy(config, device)
         
         elif mode == 'PROPOSED':
-            return ProposedAnalysisStrategy(config, device)
+            return ProposedProcessorStrategy(config, device)
             
         else:
             raise ValueError(f"[Factory] Unknown SYSTEM_MODE: {mode}")
@@ -32,7 +32,7 @@ class SystemFactory:
         mode = config.get('SYSTEM_MODE', 'BASELINE').upper()
         
         if mode == 'BASELINE':
-            return BaselineLocationStrategy(
+            return BaselineEstimatorStrategy(
                 config, 
                 device, 
                 reference_grid, 
@@ -40,7 +40,7 @@ class SystemFactory:
             )
         
         elif mode == 'PROPOSED':
-            return ProposedLocationStrategy(
+            return ProposedEstimatorStrategy(
                 config, 
                 device, 
                 reference_grid, 

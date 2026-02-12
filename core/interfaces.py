@@ -4,7 +4,7 @@ import torch
 from abc import ABC, abstractmethod
 from multiprocessing import Process, Event, Queue
 
-class ISignalProcessor(ABC):
+class IProcessor(ABC):
     """
     Convert raw CSI into model features.
     """
@@ -18,7 +18,7 @@ class ISignalProcessor(ABC):
         """
         raise NotImplementedError
 
-class ILocationEstimator(ABC):
+class IEstimator(ABC):
     """
     Estimate trajectory from features.
     """

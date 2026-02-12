@@ -1,15 +1,15 @@
-# strategies/location_strategy.py
+# engines/infer_engine/strategies/estimation_strategy.py
 
 import torch
 from typing import Optional, Tuple, Union
-from core.interfaces import ILocationEstimator
-from ..stages.indoor_location._common import grid_tools
-from ..stages.indoor_location.proposed import soft_em_utils
+from core.interfaces import IEstimator
+from ..stages.estimation._common import grid_tools
+from ..stages.estimation.proposed import soft_em_utils
 
-from ..stages.indoor_location.baseline.estimator import BaselineEstimator
-from ..stages.indoor_location.proposed.estimator import ProposedEstimator
+from ..stages.estimation.baseline.estimator import BaselineEstimator
+from ..stages.estimation.proposed.estimator import ProposedEstimator
 
-class BaselineLocationStrategy(ILocationEstimator):
+class BaselineEstimatorStrategy(IEstimator):
     """
     Strategy for Baseline localization (Hard EM / Viterbi).
     Directly wraps the legacy function.
@@ -48,7 +48,7 @@ class BaselineLocationStrategy(ILocationEstimator):
             
         return trajectory
 
-class ProposedLocationStrategy(ILocationEstimator):
+class ProposedEstimatorStrategy(IEstimator):
     """
     Strategy for Proposed localization (Physics-Aware + optional MLP gating)
     """

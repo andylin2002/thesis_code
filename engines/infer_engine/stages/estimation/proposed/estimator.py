@@ -1,4 +1,4 @@
-# indoor_location_stage/proposed/estimator.py
+# engines/infer_engine/stages/indoor_location/proposed/estimator.py
 
 import torch
 from typing import Dict, Any, Optional

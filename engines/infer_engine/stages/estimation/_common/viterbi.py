@@ -1,4 +1,4 @@
-# indoor_location_stage/_common/viterbi.py
+# engines/infer_engine/stages/estimation/_common/viterbi.py
 
 import torch
 from typing import Callable, Tuple, Optional

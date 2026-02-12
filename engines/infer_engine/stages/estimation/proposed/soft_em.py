@@ -1,4 +1,4 @@
-# indoor_location_stage/proposed/soft_em.py
+# engines/infer_engine/stages/indoor_location/proposed/soft_em.py
 
 import torch
 import numpy as np
