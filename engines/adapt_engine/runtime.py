@@ -30,6 +30,12 @@ class AdaptRuntime:
         self.load = LoadStage(self.config, self.device)
         self.repr = RepresentStage(self.config, self.device)
         self.train = TrainStage(self.config, self.device)
+    
+    @property
+    def model(self):
+        if self.train is None:
+            raise RuntimeError("Runtime not setup. Call setup() first.")
+        return self.train.model
 
     def run_step(self, raw_csi_cpu: torch.Tensor) -> Optional[Dict[str, Any]]:
         if self.load is None:
@@ -93,7 +99,7 @@ class AdaptRuntime:
             return False
 
         try:
-            checkpoint = torch.load(filepath, map_location=self.device)
+            checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
             
             # Restore state
             self.train.model.load_state_dict(checkpoint["model_state"])

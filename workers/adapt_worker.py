@@ -42,56 +42,82 @@ class AdaptWorker(BaseWorker):
         print(f"[{self.name}] Runtime setup complete on {self.device}.")
 
     def _loop(self) -> None:
-        in_queue = self.queues["data_adapt"]
-        model_queue = self.queues["model"]
+            in_queue = self.queues["data_adapt"]
+            model_queue = self.queues["model"]
 
-        # Ensure directory exists
-        os.makedirs(self.ckpt_dir, exist_ok=True)
-        
-        # hyperparameters
-        TIME = self.config.get("TIME", False)
-        SAVE_INTERVAL = self.config.get("ADAPT_SAVE_INTERVAL", 1)
-        ADAPT_SLEEP = self.config.get("ADAPT_SLEEP", 0.05)
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+            
+            # Hyperparameters
+            TIME = self.config.get("TIME", False)
+            SAVE_INTERVAL = self.config.get("ADAPT_SAVE_INTERVAL", 50)
+            UPDATE_INTERVAL = self.config.get("ADAPT_UPDATE_INTERVAL", 1) # Sync interval
+            ADAPT_SLEEP = self.config.get("ADAPT_SLEEP", 0.05)
 
-        while not self.stop_event.is_set():
-            try:
+            while not self.stop_event.is_set():
                 try:
-                    raw_csi_cpu = in_queue.get(timeout=0.1)
-                except Empty:
-                    continue
+                    try:
+                        raw_csi_cpu = in_queue.get(timeout=0.1)
+                    except Empty:
+                        continue
 
-                if self.runtime is None:
-                    raise RuntimeError("Runtime not initialized")
+                    if self.runtime is None:
+                        raise RuntimeError("Runtime not initialized")
 
-                # Step runtime
-                if TIME:
-                    with utils.Timer(f"{self.name} Total Step"):
-                        update_pkg = self.runtime.run_step(raw_csi_cpu)
-                else:
-                    update_pkg = self.runtime.run_step(raw_csi_cpu)
+                    # Step runtime (Training)
+                    if TIME:
+                        with utils.Timer(f"{self.name} Total Step"):
+                            metrics_pkg = self.runtime.run_step(raw_csi_cpu)
+                    else:
+                        metrics_pkg = self.runtime.run_step(raw_csi_cpu)
 
-                # Check for model updates
-                if update_pkg is not None:
-                    model_queue.put(update_pkg)
-                    
-                    current_step = update_pkg.get("step", 0)
-                    loss = update_pkg.get("metrics", {}).get("loss", 0.0)
-                    print(f"[{self.name}] Step {current_step} | Loss: {loss:.4f}", flush=True)
+                    # Process Output
+                    if metrics_pkg is not None:
+                        current_step = metrics_pkg.get("step", 0)
+                        loss = metrics_pkg.get("metrics", {}).get("loss", 0.0)
+                        print(f"[{self.name}] Step {current_step} | Loss: {loss:.4f}", flush=True)
 
-                    # Periodic Auto-save
-                    if current_step % (self.runtime.update_interval * SAVE_INTERVAL) == 0:
-                        print(f"[{self.name}] Auto-saving checkpoint...")
-                        self.runtime.save_checkpoint(self.ckpt_path)
-                    
-                    time.sleep(ADAPT_SLEEP)
+                        # [CRITICAL] Sync Model Weights to InferWorker
+                        if current_step % UPDATE_INTERVAL == 0:
+                            try:
+                                # 1. Extract weights
+                                state_dict = self.runtime.model.state_dict()
+                                
+                                # 2. Convert to CPU (Required for IPC)
+                                state_dict_cpu = {k: v.cpu() for k, v in state_dict.items()}
+                                
+                                # 3. Payload
+                                payload = {
+                                    "state_dict": state_dict_cpu,
+                                    "step": current_step,
+                                    "loss": loss
+                                }
+                                
+                                # 4. Send (Non-blocking, keep only latest)
+                                while not model_queue.empty():
+                                    try:
+                                        model_queue.get_nowait()
+                                    except Empty:
+                                        break
+                                
+                                model_queue.put(payload)
 
-                in_queue.task_done()
+                            except Exception as e:
+                                print(f"[{self.name}] Failed to send model update: {e}")
 
-            except Exception as e:
-                print(f"[{self.name}] Error: {e}")
-                traceback.print_exc()
+                        # Auto-save
+                        if current_step % (self.runtime.update_interval * SAVE_INTERVAL) == 0:
+                            print(f"[{self.name}] Auto-saving checkpoint...")
+                            self.runtime.save_checkpoint(self.ckpt_path)
+                        
+                        time.sleep(ADAPT_SLEEP)
 
-        # Final save on shutdown
-        if self.runtime:
-            print(f"[{self.name}] Worker stopping. Saving final checkpoint...")
-            self.runtime.save_checkpoint(self.ckpt_path)
+                    in_queue.task_done()
+
+                except Exception as e:
+                    print(f"[{self.name}] Error: {e}")
+                    traceback.print_exc()
+
+            # Final save
+            if self.runtime:
+                print(f"[{self.name}] Worker stopping. Saving final checkpoint...")
+                self.runtime.save_checkpoint(self.ckpt_path)

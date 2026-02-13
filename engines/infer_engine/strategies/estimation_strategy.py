@@ -150,5 +150,7 @@ class ProposedEstimatorStrategy(IEstimator):
         self.epd = getattr(estimator, 'epd', None)
         self.stpd = getattr(estimator, 'stpd', None)
         self.tpd = getattr(estimator, 'tpd', None)
+        self.emission_gating = emission_gating
+        self.transition_gating = transition_gating
             
         return trajectory

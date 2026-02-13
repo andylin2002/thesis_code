@@ -1,7 +1,7 @@
 # config.yaml
 
 ### --- LOOP --- ###
-LOOP: False
+LOOP: True
 
 ### --- TIME --- ###
 TIME: False
@@ -41,6 +41,11 @@ ADAPT_UPDATE_INTERVAL: 1
 ADAPT_SAVE_INTERVAL: 1
 ADAPT_MIN_UPDATES: 0
 
+# --- 4. Model Setup --- ###
 ADAPT_LR: 1e-3
 ADAPT_EMBED_DIM: 16
 ADAPT_TRIPLET_MARGIN: 1.0
+
+### --- 5. Gating Setup --- ###
+GATING_SIGMA_Z: 0.3
+GATING_SIGMA_V: 0.15

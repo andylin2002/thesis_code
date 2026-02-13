@@ -1,7 +1,6 @@
-# engines/infer_engine/stages/gating_evaluation/evaluator.py
-
 import os
 import torch
+import numpy as np  # [NEW] Added for debug calculations
 from typing import Tuple, Optional
 
 from core.models.csi_encoder import CSIEncoder
@@ -21,8 +20,12 @@ class GatingEvaluator:
         self.model = self._build_and_load_model()
 
     def _build_and_load_model(self) -> torch.nn.Module:
+        # [FIX] Robust config loading for antennas
+        # Try to get from nested CSI_DIMENSIONS, fallback to flat N_ANTENNAS, default to 3
+        csi_dims = self.config.get('CSI_DIMENSIONS', {})
+        n_ant = csi_dims.get('NUM_RX_ANTENNAS', self.config.get('N_ANTENNAS', 3))
+        
         # Input channels = N_ANTENNAS * 2 (LogMag + PhaseDiff)
-        n_ant = self.config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS']
         in_channels = n_ant * 2 
         
         model = CSIEncoder(in_channels=in_channels, embedding_dim=self.embedding_dim).to(self.device)
@@ -31,7 +34,7 @@ class GatingEvaluator:
         ckpt_path = self.config.get('CHECKPOINT_PATH', 'checkpoint/Office.ckpt')
         if os.path.exists(ckpt_path):
             try:
-                checkpoint = torch.load(ckpt_path, map_location=self.device)
+                checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=True)
                 state_dict = checkpoint.get('state_dict', checkpoint)
                 # Remove Lightning prefix
                 new_state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
@@ -63,18 +66,28 @@ class GatingEvaluator:
         return epd_gating, tpd_gating
 
     def _compute_epd_gating(self, Z: torch.Tensor) -> torch.Tensor:
-        """ Calculates spatial density score (EPD) """
+        """ Calculates spatial density score (EPD) with DEBUG diagnostics """
         Q, T, D = Z.shape
         weights = torch.zeros(Q, T, device=self.device)
+
+        # [DEBUG] Latent Space Stats
+        z_std = Z.std().item()
+        all_dists = []
 
         for t in range(T):
             t_start, t_end = max(0, t-1), min(T, t+2)
             current = Z[:, t, :].unsqueeze(1)
             neighbors = Z[:, t_start:t_end, :].reshape(-1, D).unsqueeze(0)
             
+            # Squared Euclidean Distance
+            # dists_sq shape: (Q, Neighbors)
+            dists_sq = torch.sum((current - neighbors) ** 2, dim=2)
+            
+            # Collect for debug analysis
+            all_dists.append(dists_sq.detach().cpu().numpy())
+
             # RBF Kernel
-            dists = torch.sum((current - neighbors) ** 2, dim=2)
-            scores = torch.exp(-dists / (self.sigma_z ** 2)).sum(dim=1)
+            scores = torch.exp(-dists_sq / (self.sigma_z ** 2)).sum(dim=1)
             weights[:, t] = scores
 
         norm = weights.sum(dim=0, keepdim=True) + 1e-6
