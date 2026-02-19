@@ -130,27 +130,18 @@ def calculate_grid_neighbor_delay_diff_qgk(
 # 2. Calculate Transition log Probability Distribution (TPD)
 # ==========================================
 
-def calculate_transition_log_probs_tof(
+def calculate_transition_log_probs(
     features: torch.Tensor,                 # (Q,T,C,5)
-    neighbor_index_matrix: torch.Tensor,    # (G,9)
+    neighbor_index_matrix: torch.Tensor,    # (G,K)
     grid_neighbor_delay_diff_qgk: torch.Tensor, 
     device: torch.device,
     transition_gating: Optional[torch.Tensor] = None,
     eps: float = 1e-18,
 ) -> torch.Tensor:
     """
-    ToF-based transition log-probabilities.
-
-    Output:
-        transition_log_probs: (T-1, G, 9)
-
-    transition_gating:
-        - None: physics-only, no gating
-        - (Q, T-1): per-AP per-time reliability gate in [0,1]
-          Applied BEFORE summing over APs:
-              loglik_q *= gate  (safe, keeps loglik sign)
-          (Alternative +log(gate) is also ok, but you chose multiply in spec)
+    Calculates ToF-based transition log-probabilities with optional AI gating (Log-Additive).
     """
+    # 1. Validation
     if features.dim() != 4 or features.size(-1) < 5:
         raise ValueError(f"features must be (Q,T,C,5), got {tuple(features.shape)}")
 
@@ -160,98 +151,76 @@ def calculate_transition_log_probs_tof(
 
     if T < 2:
         return torch.empty((0, G, K), device=device, dtype=torch.float32)
-    if K != 9:
-        raise ValueError(f"neighbor_index_matrix must have K=9, got {K}")
 
-    # --- diff table sanity ---
+    # 2. Prepare Diff Table & Mask
     if not isinstance(grid_neighbor_delay_diff_qgk, torch.Tensor):
         grid_neighbor_delay_diff_qgk = torch.as_tensor(grid_neighbor_delay_diff_qgk)
-
+    
     diff_tbl = grid_neighbor_delay_diff_qgk.to(device=device, dtype=torch.float32)
-    if diff_tbl.shape != (Q, G, K):
-        raise ValueError(
-            f"grid_neighbor_delay_diff_qgk shape mismatch: expected (Q,G,9)=({Q},{G},{K}), got {tuple(diff_tbl.shape)}"
-        )
-
-    # --- neighbor mask ---
     neighbor_index_matrix = torch.as_tensor(neighbor_index_matrix).to(device=device, dtype=torch.long)
     valid_mask_gk = (neighbor_index_matrix != -1)
 
-    # --- observed ToF fusion (gain-softmax over candidates) ---
-    tof_cand = features[..., 2].to(device=device, dtype=torch.float32)   # (Q,T,C)
-    gain     = features[..., 4].to(device=device, dtype=torch.float32)   # (Q,T,C)
+    # 3. TDoA Calculation (Observed)
+    tof_cand = features[..., 2].to(device=device, dtype=torch.float32)
+    gain     = features[..., 4].to(device=device, dtype=torch.float32)
 
+    # Softmax weighted average over candidates
     gain = gain - gain.max(dim=2, keepdim=True).values
-    weights = torch.softmax(gain, dim=2)                                 # (Q,T,C)
-    tau = torch.sum(weights * tof_cand, dim=2)                           # (Q,T)
+    weights = torch.softmax(gain, dim=2)
+    tau = torch.sum(weights * tof_cand, dim=2)  # (Q,T)
 
-    # --- Relative ToF (TDoA) to remove common-mode bias ---
-    ref_q = 0
-    tau_ref = tau[ref_q:ref_q + 1, :]                                    # (1,T)
-    tau_rel = tau - tau_ref                                              # (Q,T)
-    d_tau_obs = tau_rel[:, 1:] - tau_rel[:, :-1]                         # (Q,T-1)
+    # Relative ToF (Reference AP = 0)
+    tau_rel = tau - tau[0:1, :]
+    d_tau_obs = tau_rel[:, 1:] - tau_rel[:, :-1]  # (Q, T-1)
 
-    # --- predicted delta delay in the same relative domain ---
-    # diff_tbl[q,g,k] = delay(q,g) - delay(q,prev)
-    pred = diff_tbl - diff_tbl[ref_q:ref_q + 1, :, :]                    # (Q,G,9)
+    # 4. Predicted Diff & Robust Sigma
+    pred = diff_tbl - diff_tbl[0:1, :, :]  # (Q, G, K)
 
-    # --- robust sigma from MAD of d_tau_obs per AP ---
+    # Robust sigma via MAD
     med = torch.median(d_tau_obs, dim=1, keepdim=True).values
     mad = torch.median(torch.abs(d_tau_obs - med), dim=1, keepdim=True).values
-    sigma_q = 1.4826 * mad
-    sigma_q = torch.clamp(sigma_q, min=1e-12)
-    sigma = sigma_q.expand(Q, T - 1)                                     # (Q,T-1)
+    sigma = (1.4826 * mad).clamp(min=1e-12).expand(Q, T - 1)
 
-    # --- robust likelihood (Cauchy) ---
-    obs  = d_tau_obs[:, :, None, None]                                   # (Q,T-1,1,1)
-    pred = pred[:, None, :, :]                                           # (Q,1,G,9)
-    err  = obs - pred                                                    # (Q,T-1,G,9)
-
-    sigma_b = sigma[:, :, None, None]                                    # (Q,T-1,1,1)
+    # 5. Calculate Physics Log-Likelihood (Cauchy)
+    # Dimensions: (Q, T-1, G, K)
+    err = d_tau_obs[:, :, None, None] - pred[:, None, :, :]
+    sigma_b = sigma[:, :, None, None]
+    
     r2 = (err / (sigma_b + eps)) ** 2
-    loglik_q = -torch.log1p(r2)                                          # (Q,T-1,G,9)
+    loglik_q = -torch.log1p(r2) 
 
-    # -------------------------------------------------
-    # Apply transition gating (optional)
-    # -------------------------------------------------
+    # 6. Apply Transition Gating (Log-Additive)
+    # Logic: Log(P_total) = Log(P_physics) + Log(Gate)
     if transition_gating is not None:
         if not isinstance(transition_gating, torch.Tensor):
-            raise TypeError("transition_gating must be a torch.Tensor or None")
+            raise TypeError("transition_gating must be a Tensor")
+            
+        gate = transition_gating.to(device=device, dtype=loglik_q.dtype)
+        
+        if gate.shape != (Q, T - 1):
+             raise ValueError(f"Shape mismatch: {gate.shape} vs {(Q, T-1)}")
 
-        tg = transition_gating.to(device=device, dtype=loglik_q.dtype)
+        # Clamp and convert to log domain (add eps to avoid -inf)
+        gate = gate.clamp(0.0, 1.0)
+        log_gate = torch.log(gate + 1e-10) 
 
-        if tg.shape != (Q, T - 1):
-            raise ValueError(
-                f"transition_gating shape mismatch: expected (Q,T-1)=({Q},{T-1}), got {tuple(tg.shape)}"
-            )
+        # Broadcast and Add
+        loglik_q = loglik_q + log_gate.view(Q, T - 1, 1, 1)
 
-        # clamp to [0,1] for safety
-        tg = tg.clamp(0.0, 1.0)
+    # 7. Sum over APs -> LogSoftmax
+    logits_tgk = torch.sum(loglik_q, dim=0)  # (T-1, G, K)
 
-        # broadcast to (Q,T-1,G,9)
-        loglik_q = loglik_q * tg[:, :, None, None]
-
-    # --- sum over APs => logits ---
-    logits_tgk = torch.sum(loglik_q, dim=0)                              # (T-1,G,9)
-
-    # --- mask invalid neighbors and normalize ---
+    # Mask invalid neighbors
     neg_inf = torch.tensor(-float("inf"), device=device, dtype=logits_tgk.dtype)
     logits_tgk = torch.where(valid_mask_gk.unsqueeze(0), logits_tgk, neg_inf)
 
-    # handle pathological rows with no valid neighbors
-    valid_count = valid_mask_gk.sum(dim=1)
-    no_valid = (valid_count == 0)
+    # Handle isolated nodes
+    no_valid = (valid_mask_gk.sum(dim=1) == 0)
     if no_valid.any():
-        logits_tgk = logits_tgk.clone()
         logits_tgk[:, no_valid, :] = neg_inf
-        logits_tgk[:, no_valid, 4] = 0.0  # stay-put slot
+        logits_tgk[:, no_valid, 4] = 0.0
 
-    transition_log_probs = torch.log_softmax(logits_tgk, dim=-1)
-
-    if torch.isnan(transition_log_probs).any():
-        transition_log_probs = torch.nan_to_num(transition_log_probs, neginf=-1e9)
-
-    return transition_log_probs
+    return torch.nan_to_num(torch.log_softmax(logits_tgk, dim=-1), neginf=-1e9)
 
 # ==========================================
 # 2. Calculate Emission log Probability Distribution (EPD)
@@ -261,109 +230,64 @@ def calculate_emission_log_probs(
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
     grid_angle_qg: torch.Tensor,
-    emission_gating: Optional[torch.Tensor] = None, 
-    return_debug: bool=False
+    emission_gating: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     """
-    Calculates Log Emission Probability: log P(Observation_t | Grid_g)
+    Calculates AoA-based emission log-probabilities with optional AI gating (Log-Additive).
     """
-    # Dimensions
     Q, T, C, _ = features.shape
     G = grid_angle_qg.shape[1]
 
-    # Extract Features
+    # 1. Feature Extraction & Weighting
     obs_aoa_cand = features[..., 0]
     obs_aoa_sprd = features[..., 1]
     obs_gain_cand = features[..., 4]
 
-    # =========================================================
-    # Step 1: Calculate Mixture Weights (based on Gain)
-    # =========================================================
-    # Calculate Penalty
-    max_gain_q, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)          # (Q, T, 1)
-    norm_gain = obs_gain_cand / (max_gain_q + 1e-9)                        # (Q, T, C)
-    penalty_factor = 1.0 / (norm_gain + 0.1)                               # (Q, T, C)
+    # Penalty factor based on gain
+    max_gain_q, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)
+    norm_gain = obs_gain_cand / (max_gain_q + 1e-9)
+    penalty_factor = 1.0 / (norm_gain + 0.1)
 
-    # Calculate Weight (Normalize & Convert to Log Domain)
-    sum_gain = torch.sum(obs_gain_cand, dim=2, keepdim=True) + 1e-9        # (Q, T, 1)
-    weights = obs_gain_cand / sum_gain                                     # (Q, T, C)
-    log_weights = torch.log(weights + 1e-9)                                # (Q, T, C)
+    # Mixture weights
+    sum_gain = torch.sum(obs_gain_cand, dim=2, keepdim=True) + 1e-9
+    log_weights = torch.log((obs_gain_cand / sum_gain) + 1e-9)
 
-    # =========================================================
-    # Step 2: Construct Gaussian Distributions (Variance)
-    # =========================================================
-    # Align Bias & Construct Dynamic Variance based on Spread
-    bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)                          # (Q, 1, 1)
-    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa)      # (Q, T, C)
-    var_aoa = var_aoa * penalty_factor                                     # (Q, T, C)
+    # 2. Gaussian Parameters (Variance & Mean)
+    # Variance dynamic adjustment
+    bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)
+    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa) * penalty_factor
+    var_aoa = torch.clamp(var_aoa, min=1e-6).unsqueeze(1) # (Q, 1, T, C)
 
-    # Clamp for stability
-    var_aoa = torch.clamp(var_aoa, min=1e-6).unsqueeze(1)                  # (Q, 1, T, C)
+    # Mean vectors from grid
+    mean_aoa = grid_angle_qg.view(Q, G, 1, 1) + params['aoa_offset_q'].view(Q, 1, 1, 1)
 
-    # =========================================================
-    # Step 3: Construct Mean Vectors (Grid Geometry)
-    # =========================================================
-    grid_angle_exp = grid_angle_qg.view(Q, G, 1, 1)                        # (Q, G, 1, 1)
-    offset_aoa = params['aoa_offset_q'].view(Q, 1, 1, 1)                   # (Q, 1, 1, 1)
-    mean_aoa = grid_angle_exp + offset_aoa                                 # (Q, G, 1, 1)
+    # 3. Calculate Log Probability (Per AP)
+    # PDF: (Q, G, T, C)
+    log_prob_aoa = _gaussian_log_pdf_angular(obs_aoa_cand.unsqueeze(1), mean_aoa, var_aoa)
+    
+    # Mixture Integration (LogSumExp over Candidates)
+    # loglik_q: (Q, G, T)
+    loglik_q = torch.logsumexp(log_prob_aoa + log_weights.unsqueeze(1), dim=-1)
 
-    # =========================================================
-    # Step 4: Calculate Mixture Log Probability
-    # =========================================================
-    aoa_x = obs_aoa_cand.unsqueeze(1)                                      # (Q, 1, T, C)
-    log_prob_aoa = _gaussian_log_pdf_angular(aoa_x, mean_aoa, var_aoa)     # (Q, G, T, C)
-    total_log_prob_k = log_prob_aoa + log_weights.unsqueeze(1)             # (Q, G, T, C)
-
-    # =========================================================
-    # Step 5: Integration (LogSumExp)
-    # =========================================================
-    mixed_log_prob = torch.logsumexp(total_log_prob_k, dim=-1)             # (Q, G, T)
-
-    # =========================================================
-    # Step 6: Integrate APs (Optional emission_gating)
-    # =========================================================
-    log_gate_qt = None
-    mixed_log_prob_gated = None
-
-    if emission_gating is None:
-        emission_log_probs_gt = torch.sum(mixed_log_prob, dim=0)           # (G, T)
-
-    else:
-        # Align Weight dims: [Q, T] -> [Q, 1, T]
-        emission_gating = emission_gating.to(mixed_log_prob.device).type_as(mixed_log_prob)
-
-        # Sanity Check
-        if emission_gating.shape != (Q, T):
-            raise ValueError(
-                f"emission_gating shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(emission_gating.shape)}"
-            )
-
-        # Log-Gating Bias (w=1 -> 0, w=0 -> strong penalty)
-        # Note: using eps to avoid -inf and keep numerically stable
-        eps = 1e-3
-        emission_gating = torch.clamp(emission_gating, min=0.0, max=1.0)
-        log_gate_qt = torch.log(emission_gating + eps) - math.log(1.0 + eps)   # (Q, T)
-
-        mixed_log_prob_gated = mixed_log_prob + log_gate_qt.unsqueeze(1)    # (Q, G, T)
-        emission_log_probs_gt = torch.sum(mixed_log_prob_gated, dim=0)      # (G, T)
-
-    if not return_debug:
-        return emission_log_probs_gt
-
-    debug = {
-        "total_log_prob_k": total_log_prob_k,                               # (Q, G, T, C)
-        "mixed_log_prob_qgt": mixed_log_prob,                               # (Q, G, T)
-        "var_aoa_qtc": var_aoa.squeeze(1),                                  # (Q, T, C)
-        "penalty_qtc": penalty_factor,                                      # (Q, T, C)
-        "gain_qtc": obs_gain_cand,                                          # (Q, T, C)
-    }
-
+    # 4. Apply Emission Gating (Log-Additive)
+    # Logic: Log(P_total) = Log(P_physics) + Log(Gate)
     if emission_gating is not None:
-        debug["emission_gating"] = emission_gating                                # (Q, T)
-        debug["log_gate_qt"] = log_gate_qt                                  # (Q, T)
-        debug["mixed_log_prob_qgt_gated"] = mixed_log_prob_gated            # (Q, G, T)
+        if emission_gating.shape != (Q, T):
+             raise ValueError(f"Shape mismatch: {emission_gating.shape} vs {(Q,T)}")
+        
+        gate = emission_gating.to(loglik_q.device).type_as(loglik_q)
+        
+        # Clamp and convert to log domain (add eps to avoid -inf)
+        gate = torch.clamp(gate, 0.0, 1.0)
+        log_gate = torch.log(gate + 1e-10) 
+        
+        # Broadcast to (Q, 1, T) and Add
+        loglik_q = loglik_q + log_gate.view(Q, 1, T)
 
-    return emission_log_probs_gt, debug
+    # 5. Sum over APs
+    emission_log_probs_gt = torch.sum(loglik_q, dim=0)  # (G, T)
+
+    return emission_log_probs_gt
 
 def _gaussian_log_pdf_angular(x, mean, var):
     """ Angular Gaussian Log PDF handling cyclic wrapping (-180 to 180) """

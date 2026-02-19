@@ -3,7 +3,7 @@ import torch
 import numpy as np  # [NEW] Added for debug calculations
 from typing import Tuple, Optional
 
-from core.models.csi_encoder import CSIEncoder
+from core.models.csi2vec_mlp import CSI2VecMLP
 from engines.adapt_engine.stages.represent.stage import RepresentStage
 
 class GatingEvaluator:
@@ -25,10 +25,10 @@ class GatingEvaluator:
         csi_dims = self.config.get('CSI_DIMENSIONS', {})
         n_ant = csi_dims.get('NUM_RX_ANTENNAS', self.config.get('N_ANTENNAS', 3))
         
-        # Input channels = N_ANTENNAS * 2 (LogMag + PhaseDiff)
-        in_channels = n_ant * 2 
+        c_max = self.config.get('C_MAX_TAPS', 16)
+        input_dim = n_ant * c_max
         
-        model = CSIEncoder(in_channels=in_channels, embedding_dim=self.embedding_dim).to(self.device)
+        model = CSI2VecMLP(input_dim=input_dim, embedding_dim=self.embedding_dim).to(self.device)
         model.eval()
 
         ckpt_path = self.config.get('CHECKPOINT_PATH', 'checkpoint/Office.ckpt')

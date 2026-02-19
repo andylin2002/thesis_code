@@ -106,7 +106,6 @@ class ProposedEstimatorStrategy(IEstimator):
         if state_dict is not None and self.gating_evaluator.model is not None:
             try:
                 self.gating_evaluator.model.load_state_dict(state_dict, strict=False)
-                print("[ProposedStrategy] Gating model updated.")
             except Exception as e:
                 print(f"[ProposedStrategy] Model update failed: {e}")
 
@@ -130,6 +129,13 @@ class ProposedEstimatorStrategy(IEstimator):
         if raw_csi_block is not None:
             try:
                 emission_gating, transition_gating = self.gating_evaluator.evaluate(raw_csi_block)
+
+                if emission_gating is not None:
+                    emission_gating = emission_gating * self.num_ap
+                    
+                if transition_gating is not None:
+                    transition_gating = transition_gating * self.num_ap
+
             except Exception as e:
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
         

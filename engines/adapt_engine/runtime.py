@@ -88,7 +88,6 @@ class AdaptRuntime:
             "config": self.config
         }
         torch.save(checkpoint, filepath)
-        print(f"[AdaptRuntime] Checkpoint saved to: {filepath}")
 
     def load_checkpoint(self, filepath: str) -> bool:
         """Resumes training from a file."""

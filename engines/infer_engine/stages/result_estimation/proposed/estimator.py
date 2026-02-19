@@ -73,7 +73,7 @@ class ProposedEstimator:
         self.epd = self.softem.get_final_epd()
         self.stpd = self.softem.get_final_stpd()
 
-        self.tpd = soft_em_utils.calculate_transition_log_probs_tof(
+        self.tpd = soft_em_utils.calculate_transition_log_probs(
             features=self.features,
             neighbor_index_matrix=self.neighbor_matrix,
             grid_neighbor_delay_diff_qgk=self.grid_neighbor_delay_diff_qgk,

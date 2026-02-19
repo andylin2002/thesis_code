@@ -52,6 +52,10 @@ def main():
     # Override with Args
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
+
+    # Toggles to enable or disable system workers
+    RUN_INFER = config.get('RUN_INFER', True)
+    RUN_ADAPT = config.get('RUN_ADAPT', True)
     
     # Generate Reference Grid
     x_bounds = config.get("X_BOUNDS")
@@ -103,25 +107,29 @@ def main():
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
-    infer_worker = InferWorker(
-        name="InferWorker",
-        config=config,
-        queues=queues,
-        stop_event=stop_event,
-        reference_grid=reference_grid,
-        directions_vectors=directions_vectors
-    )
+    if RUN_INFER:
+        infer_worker = InferWorker(
+            name="InferWorker",
+            config=config,
+            queues=queues,
+            stop_event=stop_event,
+            reference_grid=reference_grid,
+            directions_vectors=directions_vectors
+        )
 
-    adapt_worker = AdaptWorker(
-        name="AdaptWorker",
-        config=config,
-        queues=queues,
-        stop_event=stop_event
-    )
+    if RUN_ADAPT:
+        adapt_worker = AdaptWorker(
+            name="AdaptWorker",
+            config=config,
+            queues=queues,
+            stop_event=stop_event
+        )
 
     # 7. Start Processes
-    infer_worker.start()
-    adapt_worker.start()
+    if RUN_INFER:
+        infer_worker.start()
+    if RUN_ADAPT:
+        adapt_worker.start()
 
     # 8. Main Loop (Modified for iterative Injection -> Collection -> Saving)
     loop_mode = config.get('LOOP', False)
@@ -138,9 +146,9 @@ def main():
             total_batches_in_round = 0
             
             for hmatrix_file in hmatrix_list:
-                hmatrix_path = os.path.join(dataset_folder, hmatrix_file)
-                csi_blocks = utils.load_and_preprocess_csi_dataset(
-                    Hmatrix=hmatrix_path,
+                hmatrix_folder = os.path.join(dataset_folder, hmatrix_file)
+                csi_blocks = utils.get_csi_blocks_with_cache(
+                    hmatrix_folder=hmatrix_folder,
                     config=config
                 )
 
@@ -153,106 +161,75 @@ def main():
                 
                 for block in csi_blocks:
                     # Send CPU tensor to avoid CUDA IPC locks
-                    queues['data_infer'].put(block.cpu())
-                    queues['data_adapt'].put(block.cpu())
+                    if RUN_INFER:
+                        queues['data_infer'].put(block.cpu())
+                    if RUN_ADAPT:
+                        queues['data_adapt'].put(block.cpu())
 
             if total_batches_in_round == 0:
                 print("[System] No data found in this round. Exiting.")
                 break
 
-            # --- Phase 2: Collection ---
-            print(f"[System] Waiting for {total_batches_in_round} results...")
-            
-            # Containers for THIS round
-            round_trajectories = [] 
-            round_epds = []
-            round_stpds = []
-            round_tpds = []
-            round_egs = []
-            round_tgs = []
+            if RUN_INFER:
+                # --- Phase 2: Collection ---
+                print(f"[System] Waiting for {total_batches_in_round} results...")
+                
+                # Containers for THIS round
+                round_trajectories = [] 
+                round_epds = []
+                round_stpds = []
+                round_tpds = []
+                round_egs = []
+                round_tgs = []
 
-            received_count = 0
-            while received_count < total_batches_in_round:
-                try:
-                    payload = queues["out"].get(timeout=None)
-                    received_count += 1
+                received_count = 0
+                while received_count < total_batches_in_round:
+                    try:
+                        payload = queues["out"].get(timeout=None)
+                        received_count += 1
 
-                    # 1. Collect Trajectory
-                    traj = utils.to_numpy(payload.get("trajectory"))
-                    if traj is not None: round_trajectories.append(traj)
+                        # Data Collection
+                        traj = utils.to_numpy(payload.get("trajectory"))
+                        if traj is not None: round_trajectories.append(traj)
+                        epd = utils.to_numpy(payload.get("epd"))
+                        if epd is not None: round_epds.append(epd)
+                        stpd = utils.to_numpy(payload.get("stpd"))
+                        if stpd is not None: round_stpds.append(stpd)
+                        tpd = utils.to_numpy(payload.get("tpd"))
+                        if tpd is not None: round_tpds.append(tpd)
+                        eg = utils.to_numpy(payload.get("emission_gating"))
+                        if eg is not None: round_egs.append(eg)
+                        tg = utils.to_numpy(payload.get("transition_gating"))
+                        if tg is not None: round_tgs.append(tg)
 
-                    # 2. Collect EPD
-                    epd = utils.to_numpy(payload.get("epd"))
-                    if epd is not None: round_epds.append(epd)
+                    except Exception as e:
+                        print(f"\n[System] Collection Error: {e}")
+                        break
 
-                    # 3. Collect STPD
-                    stpd = utils.to_numpy(payload.get("stpd"))
-                    if stpd is not None: round_stpds.append(stpd)
+                # --- Phase 3: Saving (Overwriting previous files) ---
+                print("[System] Saving/Overwriting outputs...")
 
-                    # 4. Collect TPD
-                    tpd = utils.to_numpy(payload.get("tpd"))
-                    if tpd is not None: round_tpds.append(tpd)
+                # Saving
+                if round_trajectories:
+                    np.save("output/predicted_trajectory.npy", np.concatenate(round_trajectories, axis=0))
+                if round_epds:
+                    np.save("output/epd.npy", np.concatenate(round_epds, axis=1))
+                if round_stpds:
+                    np.save("output/stpd.npy", np.concatenate(round_stpds, axis=1))
+                if round_tpds:
+                    np.save("output/tpd.npy", np.concatenate(round_tpds, axis=0))
+                if round_egs:
+                    np.save("output/emission_gating.npy", np.stack(round_egs, axis=0))
+                if round_tgs:
+                    np.save("output/transition_gating.npy", np.stack(round_tgs, axis=0))
+                print(f"[IO] Outputs for Round {round_idx} saved to disk.")
+                
+            else:
+                print("[System] Adapt-only mode: Skipping results collection.")
 
-                    # 5. Collect Gating
-                    eg = utils.to_numpy(payload.get("emission_gating"))
-                    if eg is not None: round_egs.append(eg)
-
-                    tg = utils.to_numpy(payload.get("transition_gating"))
-                    if tg is not None: round_tgs.append(tg)
-
-                except Exception as e:
-                    print(f"\n[System] Collection Error: {e}")
-                    break
-
-            # Wait for workers to finish processing tasks
-            queues['data_infer'].join()
-            queues['data_adapt'].join()
-            print(f"\n[System] Round {round_idx} processing complete.")
-
-            # --- Phase 3: Saving (Overwriting previous files) ---
-            print("[System] Saving/Overwriting outputs...")
-
-            # Save Trajectory
-            if round_trajectories:
-                full_path = np.concatenate(round_trajectories, axis=0)
-                np.save("output/predicted_trajectory.npy", full_path)
-            
-            # Save EPD
-            if round_epds:
-                try:
-                    full_epd = np.concatenate(round_epds, axis=1)
-                    np.save("output/epd.npy", full_epd)
-                except ValueError: pass
-
-            # Save STPD
-            if round_stpds:
-                try:
-                    full_stpd = np.concatenate(round_stpds, axis=1)
-                    np.save("output/stpd.npy", full_stpd)
-                except ValueError: pass
-
-            # Save TPD
-            if round_tpds:
-                try:
-                    full_tpd = np.concatenate(round_tpds, axis=0)
-                    np.save("output/tpd.npy", full_tpd)
-                except ValueError: pass
-
-            # Save Emission Gating
-            if round_egs:
-                try:
-                    full_eg = np.stack(round_egs, axis=0)
-                    np.save("output/emission_gating.npy", full_eg)
-                except ValueError: pass
-
-            # Save Transition Gating
-            if round_tgs:
-                try:
-                    full_tg = np.stack(round_tgs, axis=0)
-                    np.save("output/transition_gating.npy", full_tg)
-                except ValueError: pass
-
-            print(f"[IO] Outputs for Round {round_idx} saved to disk.")
+            # Queue Join
+            if RUN_INFER: queues['data_infer'].join()
+            if RUN_ADAPT: queues['data_adapt'].join()
 
             if not loop_mode:
                 break
@@ -268,11 +245,12 @@ def main():
         while not queues['out'].empty(): queues['out'].get()
         while not queues['model'].empty(): queues['model'].get()
         
-        infer_worker.join(timeout=2)
-        adapt_worker.join(timeout=2)
-
-        if infer_worker.is_alive(): infer_worker.terminate()
-        if adapt_worker.is_alive(): adapt_worker.terminate()
+        if RUN_INFER:
+            infer_worker.join(timeout=2)
+            if infer_worker.is_alive(): infer_worker.terminate()
+        if RUN_ADAPT:
+            adapt_worker.join(timeout=2)
+            if adapt_worker.is_alive(): adapt_worker.terminate()
         
         print("[System] Shutdown complete.")
 

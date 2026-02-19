@@ -41,12 +41,14 @@ class InferWorker(BaseWorker):
 
         TIME = self.config.get("TIME", False)
 
+        session_idx = 0
         while not self.stop_event.is_set():
             try:
                 raw_csi_block = in_queue.get(timeout=0.1)
             except Empty:
                 continue
-
+            
+            session_idx += 1
             try:
                 # One step inference (returns CPU-safe dict)
                 if TIME:
@@ -57,6 +59,7 @@ class InferWorker(BaseWorker):
 
                 # Always send main output
                 out_queue.put(pkg_cpu)
+                print(f"[{self.name}] Save #{session_idx} prediction trajectory!")
 
                 # Optional debug (non-blocking)
                 if debug_queue is not None:

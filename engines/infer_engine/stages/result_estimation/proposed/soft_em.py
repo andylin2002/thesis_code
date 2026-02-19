@@ -51,8 +51,6 @@ class SoftEMAlgorithm:
         self.final_spatiotemporal_probs: Optional[torch.Tensor] = None
         self.emission_gating: Optional[torch.Tensor] = None
 
-        self._debug_epd = None
-
     def initialize_params(self) -> TypePropParams:
         """
         Initialize propagation parameters(weight, bias, offset)
@@ -80,15 +78,13 @@ class SoftEMAlgorithm:
             old_params = {k: v.clone() for k, v in self.propagation_params.items()}
 
             # 1. E-Step: Calculate Emission Probability Distribution
-            emission_log_probs, epd_debug = soft_em_utils.calculate_emission_log_probs(
+            emission_log_probs = soft_em_utils.calculate_emission_log_probs(
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
-                emission_gating=self.emission_gating,
-                return_debug=True
+                emission_gating=self.emission_gating
             )
             self.final_emission_log_probs = emission_log_probs
-            self._debug_epd = epd_debug
             
             # 2. E-Step: Compute Spatio-Temporal Probability Distribution (Posterior)
             stpd_gt = soft_em_utils.run_forward_backward(

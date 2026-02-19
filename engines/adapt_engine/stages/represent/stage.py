@@ -2,58 +2,57 @@
 
 from __future__ import annotations
 from typing import Any, Dict
-
 import torch
-import torch.nn.functional as F
-
 
 class RepresentStage:
-    """
-    RepresentStage (Layer 0): Preprocessing for Shared Encoder.
-    
-    Transforms (B, Q, T, N, M) -> (B*Q*T, N*2, M)
-    This allows the ResNet to learn a unified topology space for any AP.
-    """
-
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.device = device
-        self.eps = 1e-6
+        self.c_max = int(config.get("C_MAX_TAPS", 16))
+        self.data_aug = config.get("DATA_AUG", False)
+        self.q = float(config.get("AUG_SUB_RATIO", 0.2))
 
     def process(self, raw_csi: torch.Tensor) -> torch.Tensor:
         """
-        Input:  (B, Q, T, N, M)
-        Output: (Total_Samples, Channels, Length) = (B*Q*T, N*2, M)
+        Input: (B, Q, T, N, M)
+        Output: (B*Q*T, D)
         """
-        # Ensure data is on GPU
         if raw_csi.device != self.device:
             raw_csi = raw_csi.to(self.device, non_blocking=True)
 
-        # 1. Log-Magnitude Feature (Signal Strength)
-        # Shape: (B, Q, T, N, M)
-        mag = raw_csi.abs()
-        log_mag = torch.log10(mag + self.eps)
+        # Apply Data Augmentation if enabled
+        if self.data_aug:
+            raw_csi = self._apply_aug(raw_csi)
 
-        # 2. Diff-Phase Feature (SFO Removal)
-        # Shape: (B, Q, T, N, M)
-        phase = raw_csi.angle()
-        diff_phase = torch.diff(phase, dim=-1, prepend=phase[..., 0:1])
+        # 1. Inverse DFT to Delay Domain
+        h_delay = torch.fft.ifft(raw_csi, dim=-1)
 
-        # 3. Stack Features
-        # Shape: (B, Q, T, N, M, 2)
-        x = torch.stack([log_mag, diff_phase], dim=-1)
+        # 2. Truncate taps to retain large-scale fading
+        h_trunc = h_delay[..., :self.c_max].abs()
 
-        # 4. Reshape for 1D-CNN Shared Encoder
-        B, Q, T, N, M, _ = x.shape
+        # 3. Reshape and L2 Normalization
+        B, Q, T, N, C = h_trunc.shape
+        f_flat = h_trunc.reshape(B * Q * T, -1)
+        norm = torch.norm(f_flat, p=2, dim=-1, keepdim=True) + 1e-8
+        return f_flat / norm
 
-        # Permute: Move M to end (Length), N & 2 to middle
-        # (B, Q, T, N, M, 2) -> (B, Q, T, N, 2, M)
-        x = x.permute(0, 1, 2, 3, 5, 4)
+    def _apply_aug(self, x: torch.Tensor) -> torch.Tensor:
+        """ Implement random hardware abstraction and noise injection """
+        B, Q, T, N, M = x.shape
+        
+        # 1. Randomly deactivate antennas
+        for b in range(B):
+            for q_idx in range(Q):
+                num_keep = torch.randint(1, N + 1, (1,)).item()
+                idx = torch.randperm(N)[:num_keep]
+                mask = torch.zeros(N, device=self.device)
+                mask[idx] = 1.0
+                x[b, q_idx] *= mask.view(1, N, 1)
 
-        # Flatten B, Q, T into Batch dim (Independent Samples)
-        # Flatten N, 2 into Channel dim (Spatial/Feature info)
-        # Final Shape: (B*Q*T, N*2, M)
-        x_flat = x.reshape(B * Q * T, N * 2, M)
+        # 2. Randomly remove subcarrier bands
+        num_remove = int(M * self.q)
+        if num_remove > 0:
+            start = torch.randint(0, M - num_remove + 1, (1,)).item()
+            x[..., start : start + num_remove] = 0.0
 
-        # 5. Instance Normalization
-        # Normalizes each AP/Time instance independently
-        return F.instance_norm(x_flat)
+        # 3. Add Gaussian noise
+        return x + torch.randn_like(x) * 0.01

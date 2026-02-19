@@ -9,27 +9,27 @@ class ResBlock1D(nn.Module):
     Residual Block specifically for CSI Feature Extraction.
     Maintains the 'topology' of the signal by preserving gradient flow.
     """
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, input_dim, output_dim, stride=1):
         super().__init__()
         
         self.conv1 = nn.Conv1d(
-            in_channels, out_channels, kernel_size=3, 
+            input_dim, output_dim, kernel_size=3, 
             stride=stride, padding=1, bias=False
         )
-        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.bn1 = nn.BatchNorm1d(output_dim)
         
         self.conv2 = nn.Conv1d(
-            out_channels, out_channels, kernel_size=3, 
+            output_dim, output_dim, kernel_size=3, 
             stride=1, padding=1, bias=False
         )
-        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.bn2 = nn.BatchNorm1d(output_dim)
 
         # Shortcut connection to handle dimension changes
         self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
+        if stride != 1 or input_dim != output_dim:
             self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm1d(out_channels)
+                nn.Conv1d(input_dim, output_dim, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(output_dim)
             )
 
     def forward(self, x):
@@ -53,12 +53,12 @@ class CSIEncoder(nn.Module):
     Input:  (B, In_Channels, M_Subcarriers)
     Output: (B, Embedding_Dim)
     """
-    def __init__(self, in_channels: int, embedding_dim: int = 16):
+    def __init__(self, input_dim: int, embedding_dim: int = 16):
         super().__init__()
 
         # Initial Feature Expansion
         self.stem = nn.Sequential(
-            nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.Conv1d(input_dim, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
         )

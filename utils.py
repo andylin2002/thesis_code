@@ -115,94 +115,86 @@ def generate_reference_grid(
     # The function signature (Return type) only includes grid_points_tensor, x_limits, y_limits
     return grid_points_tensor, x_limits, y_limits, W, H
 
-def load_and_preprocess_csi_dataset(
-    Hmatrix: str, 
-    config: Dict[str, Any]
-) -> List[torch.Tensor]:
+def get_csi_blocks_with_cache(hmatrix_folder: str, config: Dict[str, Any]) -> List[torch.Tensor]:
+    """
+    Load CSI data using a cache file. If cache doesn't exist, parse CSVs and save as .npy.
+    The cache file is stored inside the hmatrix_folder as 'cache.npy'.
+    """
+    # Define cache path inside the CSV folder
+    cache_path = os.path.join(hmatrix_folder, "cache.npy")
     
-    Q = len(config.get('ACCESS_POINTS', {}))
-    T = config['NUM_SAMPLE']
-    P = config['NUM_PACKET']
-    N = config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS']
-    M = config['CSI_DIMENSIONS']['NUM_SUBCARRIERS']
+    # --- Stage 1: Get Raw Data Matrix ---
+    if os.path.exists(cache_path):
+        print(f"[Cache] Loading existing cache from {cache_path}")
+        raw_csi_tensor = np.load(cache_path)
+    else:
+        print(f"[Cache] No cache found. Processing CSVs in {hmatrix_folder}...")
+        
+        # Original parameters
+        Q = len(config.get('ACCESS_POINTS', {}))
+        T = config['NUM_SAMPLE']
+        P = config['NUM_PACKET']
+        N = config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS']
+        M = config['CSI_DIMENSIONS']['NUM_SUBCARRIERS']
+        
+        filename_pattern = re.compile(r't(\d+)_hmatrix\.txSet\d+\.txPt\d+\.rxSet(\d+)\.inst(\d+)\.csv')
+        data_storage = {}
+        ap_ids_in_dataset = set()
 
-    filename_pattern = re.compile(r't(\d+)_hmatrix\.txSet\d+\.txPt\d+\.rxSet(\d+)\.inst(\d+)\.csv')
-
-    data_storage = {}
-    ap_ids_in_dataset = set()
-    
-    # Step 1: Parse filenames and load CSI data
-    for filename in os.listdir(Hmatrix):
-        match = filename_pattern.match(filename)
-        if match:
-            time_stamp = int(match.group(1))
-            rx_id = int(match.group(2))
-            inst_id = int(match.group(3)) # Subcarrier ID
-            ap_ids_in_dataset.add(rx_id)
+        # Step 1.1: Parse filenames and load CSVs
+        for filename in os.listdir(hmatrix_folder):
+            # Skip the cache file itself if it exists
+            if filename == "cache.npy": continue
             
-            file_path = os.path.join(Hmatrix, filename)
-            
-            # Read CSI data of a single subcarrier across N receive antennas (shape: N_rx,)
-            H_complex_N = _read_antenna_data_csv(file_path, N)
-            
-            if H_complex_N is not None:
-                if time_stamp not in data_storage:
-                    data_storage[time_stamp] = {}
-                if rx_id not in data_storage[time_stamp]:
-                    data_storage[time_stamp][rx_id] = {}
-                    
-                data_storage[time_stamp][rx_id][inst_id] = H_complex_N
+            match = filename_pattern.match(filename)
+            if match:
+                time_stamp, rx_id, inst_id = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                ap_ids_in_dataset.add(rx_id)
+                
+                # _read_antenna_data_csv must exist in your utils.py
+                h_complex = _read_antenna_data_csv(os.path.join(hmatrix_folder, filename), N)
+                
+                if h_complex is not None:
+                    data_storage.setdefault(time_stamp, {}).setdefault(rx_id, {})[inst_id] = h_complex
 
-    # Step 2: Align data and aggregate along the subcarrier (M) dimension
-    sorted_ap_ids = sorted(list(ap_ids_in_dataset))
-    all_time_stamps = sorted(list(data_storage.keys()))
-    total_samples = len(all_time_stamps)
-    
-    if total_samples == 0:
-        return []
+        # Step 1.2: Align data and aggregate
+        sorted_ap_ids = sorted(list(ap_ids_in_dataset))
+        all_time_stamps = sorted(list(data_storage.keys()))
+        total_samples = len(all_time_stamps)
+        
+        if total_samples == 0:
+            return []
 
-    # Final raw CSI tensor shape: (Total_Samples, Q_ap, N_rx, M_sub)
-    raw_csi_tensor = np.zeros((total_samples, Q, N, M), dtype=np.complex64)
-    
-    # Assume subcarrier indices range from 1 to M_sub
-    subcarrier_indices = list(range(1, M + 1)) 
+        raw_csi_tensor = np.zeros((total_samples, Q, N, M), dtype=np.complex64)
+        for i, ts in enumerate(all_time_stamps):
+            for j, rx_id in enumerate(sorted_ap_ids):
+                ap_data = data_storage[ts].get(rx_id, {})
+                for inst_id in range(1, M + 1):
+                    if inst_id in ap_data:
+                        raw_csi_tensor[i, j, :, inst_id - 1] = ap_data[inst_id]
 
-    for i, ts in enumerate(all_time_stamps):
-        for j, rx_id in enumerate(sorted_ap_ids):
-            ap_data = data_storage[ts].get(rx_id, {})
-            
-            # Stack data for each subcarrier ID (1 to M)
-            for k, inst_id in enumerate(subcarrier_indices):
-                if inst_id in ap_data:
-                    # H_complex_N has shape (N_rx,)
-                    raw_csi_tensor[i, j, :, k] = ap_data[inst_id] 
-                # Otherwise, keep zero (missing subcarrier data)
-    
-    # Step 3: Block segmentation and reshaping
+        # Step 1.3: Save to cache
+        np.save(cache_path, raw_csi_tensor)
+        print(f"[Cache] New cache created at {cache_path}")
+
+    # --- Stage 2: Dimension Transformation (Trim -> Reshape -> Transpose) ---
+    T, P = config['NUM_SAMPLE'], config['NUM_PACKET']
     TP_block_size = T * P
-    num_blocks = total_samples // TP_block_size
+    num_blocks = raw_csi_tensor.shape[0] // TP_block_size
 
     if num_blocks == 0:
-        print(f"Error: Total samples ({total_samples}) is less than required block size (T*P={TP_block_size}).")
+        print(f"[Error] Total samples ({raw_csi_tensor.shape[0]}) < block size ({TP_block_size}).")
         return []
 
-    # Reshape and permute axes:
-    # (Num_Blocks, Q, TP, N, M)
-    trimmed_tensor = raw_csi_tensor[:num_blocks * TP_block_size]
-    reshaped_tensor = trimmed_tensor.reshape(num_blocks, TP_block_size, Q, N, M)
-    
-    # (Num_Blocks, TP, Q, N, M) -> (Num_Blocks, Q, TP, N, M)
-    final_tensor = reshaped_tensor.transpose(0, 2, 1, 3, 4)
+    # Final shape target: (Num_Blocks, Q, TP, N, M)
+    trimmed = raw_csi_tensor[:num_blocks * TP_block_size]
+    # Reshape to (Num_Blocks, TP, Q, N, M)
+    reshaped = trimmed.reshape(num_blocks, TP_block_size, raw_csi_tensor.shape[1], raw_csi_tensor.shape[2], raw_csi_tensor.shape[3])
+    # Transpose to (Num_Blocks, Q, TP, N, M)
+    final_tensor = reshaped.transpose(0, 2, 1, 3, 4)
 
-    # Convert to a list of PyTorch tensors (kept on CPU)
-    csi_blocks_list = [
-        torch.from_numpy(block).to(torch.complex64)
-        for block in final_tensor
-    ]
-    
-    print(f"Successfully generated {len(csi_blocks_list)} CSI blocks, each of shape ({Q}, {TP_block_size}, {N}, {M}).")
-    
-    return csi_blocks_list
+    # Convert to List of Tensors
+    return [torch.from_numpy(block).to(torch.complex64) for block in final_tensor]
 
 def _read_antenna_data_csv(file_path: str, N: int) -> Optional[np.ndarray]:
     """
