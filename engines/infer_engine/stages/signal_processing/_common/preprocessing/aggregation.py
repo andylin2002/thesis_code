@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/processing/_common/preprocessing/aggregation.py
+# engines/infer_engine/stages/signal_processing/_common/preprocessing/aggregation.py
 
 from typing import Dict, Any, Optional
 import torch

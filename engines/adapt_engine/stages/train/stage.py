@@ -5,55 +5,74 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from core.models.csi2vec_mlp import CSI2VecMLP
 
 class TrainStage:
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.device = device
-        self.lr = float(config.get("LR", 1e-3))
+        self.lr = float(config.get("LR", 5e-4))
         self.embed_dim = int(config.get("EMBED_DIM", 16))
-        self.margin = float(config.get("TRIPLET_MARGIN", 10.0))
+        self.margin = float(config.get("TRIPLET_MARGIN", 2.0))
+        self.consensus_weight = float(config.get("CONSENSUS_WEIGHT", 1.0)) # 提升權重以增強 AP 共識
         
-        self.Q = len(config['ACCESS_POINTS'])
-        self.T = int(config.get('NUM_SAMPLE', 20))
+        self.Q = len(config['ACCESS_POINTS']) # 8 APs
+        self.T = int(config.get('NUM_SAMPLE', 20)) # TAF Time steps
         
-        # Dynamic input dimension calculation
-        n_ant = int(config.get("N_ANTENNAS", 3))
-        c_max = int(config.get("C_MAX_TAPS", 16))
-        input_dim = n_ant * c_max
-
-        self.model = CSI2VecMLP(input_dim=input_dim, embedding_dim=self.embed_dim).to(self.device)
+        self.model = CSI2VecMLP(
+            input_dim=int(config.get("N_ANTENNAS", 3)) * int(config.get("C_MAX_TAPS", 16)),
+            embedding_dim=self.embed_dim
+        ).to(self.device)
+        
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        self.criterion = nn.TripletMarginLoss(margin=self.margin, p=2)
+        self.triplet_loss = nn.TripletMarginLoss(margin=self.margin, p=2)
 
     def step(self, features: torch.Tensor) -> Dict[str, float]:
-        """
-        Input: (B*Q*T, D)
-        """
         self.model.train()
-        
-        # 1. Extract vector embeddings
         v_flat = self.model(features)
-        
-        # 2. Restore trajectory structure
         B = v_flat.shape[0] // (self.Q * self.T)
-        v = v_flat.view(B, self.Q, self.T, -1)
+        v = v_flat.view(B, self.Q, self.T, -1) # (B, Q, T, D)
 
-        # 3. Temporal Triplet Mining (t vs t+1)
-        anchor = v[:, :, :-1, :].reshape(-1, self.embed_dim)
-        positive = v[:, :, 1:, :].reshape(-1, self.embed_dim)
+        # 1. Temporal Triplet Loss with Safety Mask
+        # Goal: Prevent pushing away neighbors (t vs t+2) which causes low TW/CT
+        anchors = v[:, :, :-1, :].reshape(-1, self.embed_dim)
+        positives = v[:, :, 1:, :].reshape(-1, self.embed_dim)
         
-        # 4. Global Shuffled Negatives
-        idx = torch.randperm(anchor.size(0))
-        negative = anchor[idx]
+        # --- Time-window Masked Mining ---
+        # Instead of random shuffle, we pick negatives that are at least 5 steps away
+        # This prevents "Manifold Tearing"
+        batch_size_flat = anchors.size(0)
+        with torch.no_grad():
+            # Generate indices that are guaranteed to be far in time
+            shift = torch.randint(5, batch_size_flat - 5, (batch_size_flat,), device=self.device)
+            neg_idx = (torch.arange(batch_size_flat, device=self.device) + shift) % batch_size_flat
+        negatives = anchors[neg_idx]
+        
+        loss_temporal = self.triplet_loss(anchors, positives, negatives)
 
-        # 5. Optimize Triplet Margin Loss
-        loss = self.criterion(anchor, positive, negative)
+        # 2. AP Consensus Loss (The foundation for your Gating logic)
+        # Goal: Force all 8 APs to agree on the same coordinate at time t
+        v_centroid = v.mean(dim=1, keepdim=True) # (B, 1, T, D)
+        loss_consensus = F.mse_loss(v, v_centroid.expand_as(v))
+
+        # 3. Total Optimization
+        total_loss = loss_temporal + self.consensus_weight * loss_consensus
+        
         self.optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         self.optimizer.step()
 
-        return {"loss": loss.item()}
+        # 4. Diagnostic Metrics: Help you identify if APs are actually converging
+        with torch.no_grad():
+            # Average distance between APs at the same time step
+            ap_dispersion = torch.mean(torch.norm(v - v_centroid, p=2, dim=-1))
+
+        return {
+            "loss": total_loss.item(),
+            "t_loss": loss_temporal.item(),        # Monitoring path continuity
+            "c_loss": loss_consensus.item(),       # Monitoring AP consensus
+            "ap_dispersion": ap_dispersion.item()  # The lower, the more LoS-like consensus
+        }
 
     def get_state_dict(self) -> Dict[str, Any]:
         return {k: v.cpu() for k, v in self.model.state_dict().items()}

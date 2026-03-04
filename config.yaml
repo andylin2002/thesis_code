@@ -8,7 +8,7 @@ TIME: False
 
 ### --- Threads --- ###
 RUN_INFER: True
-RUN_ADAPT: True
+RUN_ADAPT: False
 
 ### --- System Mode --- ###
 #SYSTEM_MODE: 'BASELINE'
@@ -40,16 +40,17 @@ NUM_PACKET: 1                          # notation: P
 
 ### --- 3. Adapt_worker Setup --- ###
 ADAPT_SLEEP: 0.05
-ADAPT_BATCH_SIZE: 1
+ADAPT_BATCH_SIZE: 13
 ADAPT_UPDATE_INTERVAL: 1
 ADAPT_SAVE_INTERVAL: 1
 ADAPT_MIN_UPDATES: 0
 
 # --- 4. Model Setup --- ###
-NUM_EPOCHS: 100
-LR: 1e-3
+NUM_EPOCHS: 1000
+LR: 5e-4
 EMBED_DIM: 16
-TRIPLET_MARGIN: 10.0
+TRIPLET_MARGIN: 1.0
+CONSENSUS_WEIGHT: 0.5
 
 C_MAX_TAPS: 16
 DATA_AUG: False

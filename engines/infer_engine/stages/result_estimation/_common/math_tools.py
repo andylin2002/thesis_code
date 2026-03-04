@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/estimation/_common/math_tools.py
+# engines/infer_engine/stages/result_estimation/_common/math_tools.py
 
 import torch
 import math

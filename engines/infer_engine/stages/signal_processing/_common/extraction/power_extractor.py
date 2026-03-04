@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/processing/_common/extraction/power_extractor.py
+# engines/infer_engine/stages/signal_processing/_common/extraction/power_extractor.py
 
 import torch
 from typing import Optional

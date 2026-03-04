@@ -1,3 +1,5 @@
+# engines/infer_engine/stages/gating_evaluation/evaluator.py
+
 import os
 import torch
 import numpy as np  # [NEW] Added for debug calculations

@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/processing/_common/extraction/delay_estimator.py
+# engines/infer_engine/stages/signal_processing/_common/extraction/delay_estimator.py
 
 import torch
 

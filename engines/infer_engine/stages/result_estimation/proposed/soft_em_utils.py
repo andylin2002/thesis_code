@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/estimation/proposed/soft_em_utils.py
+# engines/infer_engine/stages/result_estimation/proposed/soft_em_utils.py
 
 import torch
 import math

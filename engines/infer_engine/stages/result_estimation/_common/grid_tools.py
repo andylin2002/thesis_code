@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/estimation/_common/grid_tools.py
+# engines/infer_engine/stages/result_estimation/_common/grid_tools.py
 
 import torch
 import numpy as np

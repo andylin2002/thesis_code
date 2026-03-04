@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/estimation/_common/viterbi.py
+# engines/infer_engine/stages/result_estimation/_common/viterbi.py
 
 import torch
 from typing import Callable, Tuple, Optional

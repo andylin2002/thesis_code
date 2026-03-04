@@ -1,4 +1,4 @@
-# engines/infer_engine/stages/estimation/baseline/hard_em.py
+# engines/infer_engine/stages/result_estimation/baseline/hard_em.py
 
 import torch
 import numpy as np
