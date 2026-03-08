@@ -7,6 +7,7 @@ import torch
 
 # Import common utilities
 from .._common.preprocessing.aggregation import run_csi_aggregation
+from .._common.extraction.music import MUSICAlgorithm
 from .._common.extraction.mmp import MMPAlgorithm
 from .._common.extraction import power_extractor, delay_estimator
 
@@ -17,8 +18,17 @@ class BaselineProcessor:
         """
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
-        self.mmp_engine = MMPAlgorithm(config=config)
+
+        self.aoa_method = config.get('BASELINE_AOA_METHOD', 'music').lower()
+
+        if self.aoa_method == 'music':
+            self.extractor_engine = MUSICAlgorithm(config=config)
+        elif self.aoa_method == 'mmp':
+            self.extractor_engine = MMPAlgorithm(config=config)
+        else:
+            raise ValueError(
+                f"{self.aoa_method} is the Unknown AoA Extraction Method."
+            )
         
         # Cache config parameters
         self.ap_data = config.get('ACCESS_POINTS', {})
@@ -47,10 +57,16 @@ class BaselineProcessor:
         )
 
         # --- Angle ---
-        aoa_all_paths, tof_all_paths, gain_all_paths = self.mmp_engine.estimate_aoa_tof_batch(
-            input_csi=batch_input_csi
-        )
-        angle_flat = aoa_all_paths[:, 0]
+        if self.aoa_method == 'mmp':
+            aoa_all_paths, tof_all_paths, gain_all_paths = self.extractor_engine.estimate_aoa_tof_batch(
+                input_csi=batch_input_csi
+            )
+            angle_flat = aoa_all_paths[:, 0]
+        else:
+            # self.aoa_method == 'music'
+            angle_flat = self.extractor_engine.estimate_aoa_batch(
+                batch_input_csi=batch_input_csi
+            )
 
         # --- Delay ---
         delay_flat = delay_estimator.estimate_delay_batch(num_batch, batch_input_csi)

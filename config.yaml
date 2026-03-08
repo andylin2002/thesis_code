@@ -11,8 +11,8 @@ RUN_INFER: True
 RUN_ADAPT: False
 
 ### --- System Mode --- ###
-#SYSTEM_MODE: 'BASELINE'
-SYSTEM_MODE: 'PROPOSED'
+SYSTEM_MODE: 'BASELINE'
+#SYSTEM_MODE: 'PROPOSED'
 
 ### --- Environment & Trajectory --- ###
 DATASET_FOLDER: "dataset_office_8AP"
@@ -37,6 +37,9 @@ ANTENNA_DISTANCE: 0.03                    # notation: d
 # --- Packeting & Aggregation ---
 NUM_SAMPLE: 20                           # notation: T
 NUM_PACKET: 1                             # notation: P
+
+# --- Baseline Angle Extractor ---
+BASELINE_AOA_METHOD: 'music'              # 'music' or 'mmp'
 
 ### --- 3. Adapt_worker Setup --- ###
 ADAPT_SLEEP: 0.05
