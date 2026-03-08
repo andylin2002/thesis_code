@@ -122,13 +122,19 @@ class ProposedEstimatorStrategy(IEstimator):
         1. AI Evaluation -> Get Weights
         2. Physics Estimation -> Use Weights -> Get Trajectory
         """
+        # Extract Physical Gain
+        mmp_gain = features[..., 4].max(dim=2).values
+
         # Get gating weight
         emission_gating: Optional[torch.Tensor] = None
         transition_gating: Optional[torch.Tensor] = None
 
         if raw_csi_block is not None:
             try:
-                emission_gating, transition_gating = self.gating_evaluator.evaluate(raw_csi_block)
+                emission_gating, transition_gating = self.gating_evaluator.evaluate(
+                    raw_csi_block=raw_csi_block, 
+                    mmp_gain=mmp_gain
+                )
 
                 if emission_gating is not None:
                     emission_gating = emission_gating * self.num_ap

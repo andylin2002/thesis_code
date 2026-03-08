@@ -25,17 +25,10 @@ def initialize_parameters(
     aoa_bias_q =    torch.zeros(Q, dtype=torch.float32, device=device)
     aoa_offset_q =  torch.zeros(Q, dtype=torch.float32, device=device)
 
-    tof_weight =    torch.ones(1, dtype=torch.float32, device=device)
-    tof_bias_q =    torch.zeros(Q, dtype=torch.float32, device=device)
-    tof_offset_q =  torch.zeros(Q, dtype=torch.float32, device=device)
-
     return {
         'aoa_weight':   aoa_weight,
         'aoa_bias_q':   aoa_bias_q, 
         'aoa_offset_q': aoa_offset_q, 
-        'tof_weight':   tof_weight, 
-        'tof_bias_q':   tof_bias_q, 
-        'tof_offset_q': tof_offset_q
     }
 
 def calculate_grid_angle_qg(
@@ -127,113 +120,17 @@ def calculate_grid_neighbor_delay_diff_qgk(
     return diff_qg9
 
 # ==========================================
-# 2. Calculate Transition log Probability Distribution (TPD)
-# ==========================================
-
-def calculate_transition_log_probs(
-    features: torch.Tensor,                 # (Q,T,C,5)
-    neighbor_index_matrix: torch.Tensor,    # (G,K)
-    grid_neighbor_delay_diff_qgk: torch.Tensor, 
-    device: torch.device,
-    transition_gating: Optional[torch.Tensor] = None,
-    eps: float = 1e-18,
-) -> torch.Tensor:
-    """
-    Calculates ToF-based transition log-probabilities with optional AI gating (Log-Additive).
-    """
-    # 1. Validation
-    if features.dim() != 4 or features.size(-1) < 5:
-        raise ValueError(f"features must be (Q,T,C,5), got {tuple(features.shape)}")
-
-    Q, T, C, F = features.shape
-    G = int(neighbor_index_matrix.size(0))
-    K = int(neighbor_index_matrix.size(1))
-
-    if T < 2:
-        return torch.empty((0, G, K), device=device, dtype=torch.float32)
-
-    # 2. Prepare Diff Table & Mask
-    if not isinstance(grid_neighbor_delay_diff_qgk, torch.Tensor):
-        grid_neighbor_delay_diff_qgk = torch.as_tensor(grid_neighbor_delay_diff_qgk)
-    
-    diff_tbl = grid_neighbor_delay_diff_qgk.to(device=device, dtype=torch.float32)
-    neighbor_index_matrix = torch.as_tensor(neighbor_index_matrix).to(device=device, dtype=torch.long)
-    valid_mask_gk = (neighbor_index_matrix != -1)
-
-    # 3. TDoA Calculation (Observed)
-    tof_cand = features[..., 2].to(device=device, dtype=torch.float32)
-    gain     = features[..., 4].to(device=device, dtype=torch.float32)
-
-    # Softmax weighted average over candidates
-    gain = gain - gain.max(dim=2, keepdim=True).values
-    weights = torch.softmax(gain, dim=2)
-    tau = torch.sum(weights * tof_cand, dim=2)  # (Q,T)
-
-    # Relative ToF (Reference AP = 0)
-    tau_rel = tau - tau[0:1, :]
-    d_tau_obs = tau_rel[:, 1:] - tau_rel[:, :-1]  # (Q, T-1)
-
-    # 4. Predicted Diff & Robust Sigma
-    pred = diff_tbl - diff_tbl[0:1, :, :]  # (Q, G, K)
-
-    # Robust sigma via MAD
-    med = torch.median(d_tau_obs, dim=1, keepdim=True).values
-    mad = torch.median(torch.abs(d_tau_obs - med), dim=1, keepdim=True).values
-    sigma = (1.4826 * mad).clamp(min=1e-12).expand(Q, T - 1)
-
-    # 5. Calculate Physics Log-Likelihood (Cauchy)
-    # Dimensions: (Q, T-1, G, K)
-    err = d_tau_obs[:, :, None, None] - pred[:, None, :, :]
-    sigma_b = sigma[:, :, None, None]
-    
-    r2 = (err / (sigma_b + eps)) ** 2
-    loglik_q = -torch.log1p(r2) 
-
-    # 6. Apply Transition Gating (Log-Additive)
-    # Logic: Log(P_total) = Log(P_physics) + Log(Gate)
-    if transition_gating is not None:
-        if not isinstance(transition_gating, torch.Tensor):
-            raise TypeError("transition_gating must be a Tensor")
-            
-        gate = transition_gating.to(device=device, dtype=loglik_q.dtype)
-        
-        if gate.shape != (Q, T - 1):
-             raise ValueError(f"Shape mismatch: {gate.shape} vs {(Q, T-1)}")
-
-        # Clamp and convert to log domain (add eps to avoid -inf)
-        gate = gate.clamp(0.0, 1.0)
-        log_gate = torch.log(gate + 1e-10) 
-
-        # Broadcast and Add
-        loglik_q = loglik_q + log_gate.view(Q, T - 1, 1, 1)
-
-    # 7. Sum over APs -> LogSoftmax
-    logits_tgk = torch.sum(loglik_q, dim=0)  # (T-1, G, K)
-
-    # Mask invalid neighbors
-    neg_inf = torch.tensor(-float("inf"), device=device, dtype=logits_tgk.dtype)
-    logits_tgk = torch.where(valid_mask_gk.unsqueeze(0), logits_tgk, neg_inf)
-
-    # Handle isolated nodes
-    no_valid = (valid_mask_gk.sum(dim=1) == 0)
-    if no_valid.any():
-        logits_tgk[:, no_valid, :] = neg_inf
-        logits_tgk[:, no_valid, 4] = 0.0
-
-    return torch.nan_to_num(torch.log_softmax(logits_tgk, dim=-1), neginf=-1e9)
-
-# ==========================================
 # 2. Calculate Emission log Probability Distribution (EPD)
 # ==========================================
 
 def calculate_emission_log_probs(
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
-    grid_angle_qg: torch.Tensor,
-    emission_gating: Optional[torch.Tensor] = None
+    grid_angle_qg: torch.Tensor, 
+    tof_params: Dict[str, float]
 ) -> torch.Tensor:
     """
-    Calculates AoA-based emission log-probabilities with optional AI gating (Log-Additive).
+    Calculates AoA-based emission log-probabilities.
     """
     Q, T, C, _ = features.shape
     G = grid_angle_qg.shape[1]
@@ -241,22 +138,24 @@ def calculate_emission_log_probs(
     # 1. Feature Extraction & Weighting
     obs_aoa_cand = features[..., 0]
     obs_aoa_sprd = features[..., 1]
+    obs_tof_cand = features[..., 2]
+    obs_tof_sprd = features[..., 3]
     obs_gain_cand = features[..., 4]
 
-    # Penalty factor based on gain
-    max_gain_q, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)
-    norm_gain = obs_gain_cand / (max_gain_q + 1e-9)
-    penalty_factor = 1.0 / (norm_gain + 0.1)
+    # Calculate Gain Penalty
+    gain_var_penalty = _calculate_gain_variance_penalty(obs_gain_cand)
 
-    # Mixture weights
-    sum_gain = torch.sum(obs_gain_cand, dim=2, keepdim=True) + 1e-9
-    log_weights = torch.log((obs_gain_cand / sum_gain) + 1e-9)
+    # Calculate Independent Reliability
+    log_rel_gain = _calculate_log_gain_reliability(obs_gain_cand)
+    log_rel_tof = _calculate_log_tof_reliability(obs_tof_cand, obs_tof_sprd, tof_params)
+
+    log_path_scores = log_rel_gain + log_rel_tof
+    log_reliability_weights = torch.log_softmax(log_path_scores, dim=-1)
 
     # 2. Gaussian Parameters (Variance & Mean)
     # Variance dynamic adjustment
     bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)
-    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa) * penalty_factor
-    var_aoa = torch.clamp(var_aoa, min=1e-6).unsqueeze(1) # (Q, 1, T, C)
+    var_aoa = ((params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa) * gain_var_penalty).clamp(min=1e-6).unsqueeze(1)
 
     # Mean vectors from grid
     mean_aoa = grid_angle_qg.view(Q, G, 1, 1) + params['aoa_offset_q'].view(Q, 1, 1, 1)
@@ -266,28 +165,9 @@ def calculate_emission_log_probs(
     log_prob_aoa = _gaussian_log_pdf_angular(obs_aoa_cand.unsqueeze(1), mean_aoa, var_aoa)
     
     # Mixture Integration (LogSumExp over Candidates)
-    # loglik_q: (Q, G, T)
-    loglik_q = torch.logsumexp(log_prob_aoa + log_weights.unsqueeze(1), dim=-1)
+    emission_log_probs_qgt = torch.logsumexp(log_prob_aoa + log_reliability_weights.unsqueeze(1), dim=-1)
 
-    # 4. Apply Emission Gating (Log-Additive)
-    # Logic: Log(P_total) = Log(P_physics) + Log(Gate)
-    if emission_gating is not None:
-        if emission_gating.shape != (Q, T):
-             raise ValueError(f"Shape mismatch: {emission_gating.shape} vs {(Q,T)}")
-        
-        gate = emission_gating.to(loglik_q.device).type_as(loglik_q)
-        
-        # Clamp and convert to log domain (add eps to avoid -inf)
-        gate = torch.clamp(gate, 0.0, 1.0)
-        log_gate = torch.log(gate + 1e-10) 
-        
-        # Broadcast to (Q, 1, T) and Add
-        loglik_q = loglik_q + log_gate.view(Q, 1, T)
-
-    # 5. Sum over APs
-    emission_log_probs_gt = torch.sum(loglik_q, dim=0)  # (G, T)
-
-    return emission_log_probs_gt
+    return emission_log_probs_qgt
 
 def _gaussian_log_pdf_angular(x, mean, var):
     """ Angular Gaussian Log PDF handling cyclic wrapping (-180 to 180) """
@@ -299,6 +179,37 @@ def _gaussian_log_pdf_angular(x, mean, var):
 def _gaussian_log_pdf_linear(x, mean, var):
     """ Standard Gaussian Log PDF: -0.5*log(2pi*var) - (x-mu)^2/(2var) """
     return -0.5 * (torch.log(2 * torch.pi * var) + (x - mean)**2 / var)
+
+def _calculate_gain_variance_penalty(obs_gain_cand: torch.Tensor) -> torch.Tensor:
+    max_gain, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)
+    norm_gain = obs_gain_cand / (max_gain + 1e-9)
+    return 1.0 / (norm_gain + 0.1)
+
+def _calculate_log_gain_reliability(obs_gain_cand: torch.Tensor) -> torch.Tensor:
+    """
+    Computes log-reliability based on path strength.
+    """
+    log_gain_reliability = torch.log(obs_gain_cand + 1e-9)
+    
+    return log_gain_reliability
+
+def _calculate_log_tof_reliability(
+    obs_tof_cand: torch.Tensor, 
+    obs_tof_sprd: torch.Tensor, 
+    tof_params: Dict[str, float]
+) -> torch.Tensor:
+    """
+    Computes log-reliability based on ToF physical boundary.
+    """
+    limit = tof_params['tof_limit_sec']
+    strength = tof_params['tof_penalty_strength']
+    
+    safe_sprd = torch.clamp(obs_tof_sprd, min=1e-10)
+    z_score = (obs_tof_cand - limit) / safe_sprd
+    p_invalid = 0.5 * (1.0 + torch.erf(z_score / 1.41421356))
+    
+    log_tof_reliability = torch.log((1.0 - p_invalid) + (p_invalid / strength) + 1e-9)
+    return log_tof_reliability
 
 # ==========================================
 # 3. Calculate Spatial-Temporal Probability Distribution (STPD)
@@ -419,9 +330,8 @@ def update_soft_parameters(
     diff_aoa = torch.remainder(diff_aoa + 180.0, 360.0) - 180.0
 
     # Update Offsets [Q]
-    momentum = 0.99
     raw_aoa_offset = torch.sum(weight_aoa_offset_qgt * diff_aoa, dim=(1, 2)) / (torch.sum(weight_aoa_offset_qgt, dim=(1, 2)) + 1e-9)
-    new_params['aoa_offset_q'] = momentum * old_params['aoa_offset_q'] + (1 - momentum) * raw_aoa_offset
+    new_params['aoa_offset_q'] = raw_aoa_offset
 
     # =========================================================================
     # Part 2: Update Variance Parameters
@@ -448,10 +358,6 @@ def update_soft_parameters(
             min_bias=MIN_BIAS_AOA
         )
     )
-
-    new_params['tof_weight'] = old_params['tof_weight']
-    new_params['tof_bias_q'] = old_params['tof_bias_q']
-    new_params['tof_offset_q'] = old_params['tof_offset_q']
 
     return new_params
 

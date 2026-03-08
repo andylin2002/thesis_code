@@ -72,14 +72,7 @@ class ProposedEstimator:
         # --- Step 2: Retrieve the Calculated EPD & STPD ---
         self.epd = self.softem.get_final_epd()
         self.stpd = self.softem.get_final_stpd()
-
-        self.tpd = soft_em_utils.calculate_transition_log_probs(
-            features=self.features,
-            neighbor_index_matrix=self.neighbor_matrix,
-            grid_neighbor_delay_diff_qgk=self.grid_neighbor_delay_diff_qgk,
-            transition_gating=self.transition_gating, 
-            device=self.device,
-        )
+        self.tpd = None
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler

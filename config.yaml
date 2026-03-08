@@ -36,7 +36,7 @@ ANTENNA_DISTANCE: 0.03                    # notation: d
 
 # --- Packeting & Aggregation ---
 NUM_SAMPLE: 20                           # notation: T
-NUM_PACKET: 1                          # notation: P
+NUM_PACKET: 1                             # notation: P
 
 ### --- 3. Adapt_worker Setup --- ###
 ADAPT_SLEEP: 0.05
@@ -57,5 +57,4 @@ DATA_AUG: False
 AUG_SUB_RATIO: 0.2
 
 ### --- 5. Gating Setup --- ###
-GATING_SIGMA_Z: 0.3
-GATING_SIGMA_V: 0.15
+GATING_TEMP: 1.0

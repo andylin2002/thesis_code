@@ -1,8 +1,10 @@
 # engines/infer_engine/stages/result_estimation/proposed/soft_em.py
 
+import os
 import torch
 import numpy as np
 from typing import Dict, Any, Optional
+
 
 from . import soft_em_utils
 
@@ -47,9 +49,18 @@ class SoftEMAlgorithm:
             nm = torch.as_tensor(nm)
         self.neighbor_matrix = nm.to(device=device, dtype=torch.long)
 
-        self.final_emission_log_probs: Optional[torch.Tensor] = None
-        self.final_spatiotemporal_probs: Optional[torch.Tensor] = None
+        self.emission_log_probs_qgt: Optional[torch.Tensor] = None
+        self.spatiotemporal_probs_gt: Optional[torch.Tensor] = None
         self.emission_gating: Optional[torch.Tensor] = None
+
+        # Pre-calculate Parameters using in tof penalty calculation
+        self.tof_params = self._calculate_tof_params()
+
+        # DEBUG
+        output_nm_path = "output/neighbor_matrix.npy"
+        if not os.path.exists(output_nm_path):
+            nm_np = self.neighbor_matrix.detach().cpu().numpy()
+            np.save(output_nm_path, nm_np)
 
     def initialize_params(self) -> TypePropParams:
         """
@@ -78,21 +89,21 @@ class SoftEMAlgorithm:
             old_params = {k: v.clone() for k, v in self.propagation_params.items()}
 
             # 1. E-Step: Calculate Emission Probability Distribution
-            emission_log_probs = soft_em_utils.calculate_emission_log_probs(
+            self.emission_log_probs_qgt = soft_em_utils.calculate_emission_log_probs(
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
-                emission_gating=self.emission_gating
+                self.tof_params
             )
-            self.final_emission_log_probs = emission_log_probs
+            emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)  # (G, T)
             
             # 2. E-Step: Compute Spatio-Temporal Probability Distribution (Posterior)
             stpd_gt = soft_em_utils.run_forward_backward(
-                emission_log_probs,
+                emission_log_probs_gt,
                 self.neighbor_matrix,
                 self.device
             )
-            self.final_spatiotemporal_probs = stpd_gt
+            self.spatiotemporal_probs_gt = stpd_gt
             
             # 3. M-Step: Update Parameters using Soft Weights
             new_params = soft_em_utils.update_soft_parameters(
@@ -150,12 +161,57 @@ class SoftEMAlgorithm:
 
     def get_final_epd(self) -> torch.Tensor:
         """ Returns the EPD from the last iteration. """
-        if self.final_emission_log_probs is None:
+        if self.emission_log_probs_qgt is None:
             raise RuntimeError("Run step_parameters() first!")
-        return self.final_emission_log_probs
+        
+        final_epd_qgt = self.emission_log_probs_qgt.clone()
+
+        if self.emission_gating is not None:
+            eps = torch.finfo(self.emission_gating.dtype).eps
+            safe_gating = torch.clamp(self.emission_gating, min=eps)
+            gating_log_qt = torch.log(safe_gating)
+            gating_log_q1t = gating_log_qt.unsqueeze(1)
+            final_epd_qgt = final_epd_qgt + gating_log_q1t
+
+        final_epd_gt = torch.sum(final_epd_qgt, dim=0)
+
+        return final_epd_gt
     
     def get_final_stpd(self) -> torch.Tensor:
         """ Returns the STPD from the last iteration. """
-        if self.final_spatiotemporal_probs is None:
+        if self.spatiotemporal_probs_gt is None:
             raise RuntimeError("Run step_parameters() first!")
-        return self.final_spatiotemporal_probs
+        return self.spatiotemporal_probs_gt
+    
+    def _calculate_tof_params(self) -> Dict[str, float]:
+        """
+        Dynamically calculates ToF boundary parameters based on environment grid and bandwidth.
+        """
+        import math
+        LIGHT_SPEED = 299792458.0
+        
+        # 1. Calculate bandwidth margin (distance resolution limit)
+        bw_hz = float(self.config.get('CHANNEL_BANDWIDTH_HZ', 20000000.0))
+        bandwidth_margin = LIGHT_SPEED / bw_hz  
+        
+        # 2. Calculate room diagonal from reference grid
+        min_x = torch.min(self.reference_grid[:, 0]).item()
+        max_x = torch.max(self.reference_grid[:, 0]).item()
+        min_y = torch.min(self.reference_grid[:, 1]).item()
+        max_y = torch.max(self.reference_grid[:, 1]).item()
+        room_diagonal = math.sqrt((max_x - min_x)**2 + (max_y - min_y)**2)
+        
+        # 3. Calculate maximum allowed flight distance before penalty
+        dist_limit = room_diagonal + bandwidth_margin
+        
+        # 4. Physics-derived maximum variance penalty multiplier
+        # (Flattening a typical 10-degree LoS signal into a 70-degree NLoS scatter)
+        nlos_spread_deg = float(self.config.get('NLOS_SPREAD_DEG', 70.0))
+        los_spread_deg = float(self.config.get('LOS_SPREAD_DEG', 10.0))
+        penalty_strength = (nlos_spread_deg / los_spread_deg) ** 2
+
+        # 5. Return parameters dictionary
+        return {
+            'tof_limit_sec': dist_limit / LIGHT_SPEED, 
+            'tof_penalty_strength': penalty_strength
+        }
