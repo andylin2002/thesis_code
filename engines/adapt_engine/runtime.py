@@ -29,13 +29,13 @@ class AdaptRuntime:
     def setup(self) -> None:
         self.load = LoadStage(self.config, self.device)
         self.repr = RepresentStage(self.config, self.device)
-        self.train = TrainStage(self.config, self.device)
+        self.train = TrainStage(self.config, self.device, self.repr.encoder)
     
     @property
     def model(self):
         if self.train is None:
             raise RuntimeError("Runtime not setup. Call setup() first.")
-        return self.train.model
+        return self.train.encoder
 
     def run_step(self, raw_csi_cpu: torch.Tensor) -> Optional[Dict[str, Any]]:
         if self.load is None:
@@ -49,7 +49,7 @@ class AdaptRuntime:
 
         # Phase 2: Represent (Physics Transformation)
         batch_gpu = batch_tensor.to(self.device, non_blocking=True)
-        features = self.repr.process(batch_gpu)
+        features = self.repr.process(batch_gpu, return_projection=True)
 
         # Phase 3: Train (Model Learning)
         metrics = self.train.step(features)
@@ -72,7 +72,11 @@ class AdaptRuntime:
                 "metrics": metrics
             }
         
-        return None
+        return {
+            "type": "training_step",
+            "step": self.steps,
+            "metrics": metrics
+        }
     
     def save_checkpoint(self, filepath: str) -> None:
         """Saves model, optimizer, steps, and config."""
@@ -101,7 +105,7 @@ class AdaptRuntime:
             checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
             
             # Restore state
-            self.train.model.load_state_dict(checkpoint["model_state"])
+            self.train.encoder.load_state_dict(checkpoint["model_state"])
             self.train.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.steps = checkpoint.get("step", 0)
 

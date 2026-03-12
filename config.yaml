@@ -8,11 +8,11 @@ TIME: False
 
 ### --- Threads --- ###
 RUN_INFER: True
-RUN_ADAPT: False
+RUN_ADAPT: True
 
 ### --- System Mode --- ###
-SYSTEM_MODE: 'BASELINE'
-#SYSTEM_MODE: 'PROPOSED'
+#SYSTEM_MODE: 'BASELINE'
+SYSTEM_MODE: 'PROPOSED'
 
 ### --- Environment & Trajectory --- ###
 DATASET_FOLDER: "dataset_office_8AP"
@@ -39,20 +39,19 @@ NUM_SAMPLE: 20                           # notation: T
 NUM_PACKET: 1                             # notation: P
 
 # --- Baseline Angle Extractor ---
-BASELINE_AOA_METHOD: 'music'              # 'music' or 'mmp'
+BASELINE_AOA_METHOD: 'mmp'              # 'music' or 'mmp'
 
 ### --- 3. Adapt_worker Setup --- ###
 ADAPT_SLEEP: 0.05
-ADAPT_BATCH_SIZE: 13
+ADAPT_BATCH_SIZE: 16
 ADAPT_UPDATE_INTERVAL: 1
 ADAPT_SAVE_INTERVAL: 1
 ADAPT_MIN_UPDATES: 0
 
 # --- 4. Model Setup --- ###
-NUM_EPOCHS: 1000
 LR: 5e-4
 EMBED_DIM: 16
-TRIPLET_MARGIN: 1.0
+CONTRASTIVE_TAU: 0.07
 CONSENSUS_WEIGHT: 0.5
 
 C_MAX_TAPS: 16
@@ -60,4 +59,4 @@ DATA_AUG: False
 AUG_SUB_RATIO: 0.2
 
 ### --- 5. Gating Setup --- ###
-GATING_TEMP: 1.0
+GATING_TEMP: 0.002

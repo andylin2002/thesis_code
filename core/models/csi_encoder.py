@@ -1,106 +1,94 @@
 # core/models/csi_encoder.py
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-class ResBlock1D(nn.Module):
-    """
-    Residual Block specifically for CSI Feature Extraction.
-    Maintains the 'topology' of the signal by preserving gradient flow.
-    """
-    def __init__(self, input_dim, output_dim, stride=1):
-        super().__init__()
-        
-        self.conv1 = nn.Conv1d(
-            input_dim, output_dim, kernel_size=3, 
-            stride=stride, padding=1, bias=False
-        )
-        self.bn1 = nn.BatchNorm1d(output_dim)
-        
-        self.conv2 = nn.Conv1d(
-            output_dim, output_dim, kernel_size=3, 
-            stride=1, padding=1, bias=False
-        )
-        self.bn2 = nn.BatchNorm1d(output_dim)
-
-        # Shortcut connection to handle dimension changes
-        self.shortcut = nn.Sequential()
-        if stride != 1 or input_dim != output_dim:
-            self.shortcut = nn.Sequential(
-                nn.Conv1d(input_dim, output_dim, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm1d(output_dim)
-            )
-
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)  # The magic of ResNet: f(x) + x
-        out = F.relu(out)
-        return out
-
 
 class CSIEncoder(nn.Module):
     """
-    Topology-Preserving CSI Encoder.
-    
-    Architecture Philosophy:
-    1. Stem: Expands physics-features into high-dim latent space.
-    2. Backbone: ResNet-1D stages to capture frequency-selective fading patterns.
-    3. Neck: Global Pooling to ensure robustness to small jitters.
-    4. Head: Projection to the specific manifold dimension (Channel Charting).
-
-    Input:  (B, In_Channels, M_Subcarriers)
-    Output: (B, Embedding_Dim)
+    CSIEncoder for one AP.
+    Input: [B, T, N-1, M, 2]  (preprocessed CSI: amplitude + phase difference)
+    Output: latent vector z_q or projection vector for contrastive learning
     """
-    def __init__(self, input_dim: int, embedding_dim: int = 16):
+
+    def __init__(
+        self,
+        num_antennas=3,
+        num_subcarriers=21,
+        cnn_channels=[16, 32],
+        cnn_kernel=(3, 3),
+        gru_hidden=64,
+        gru_layers=1,
+        mlp_hidden=32,
+        latent_dim=16,
+        proj_dim=16
+    ):
         super().__init__()
 
-        # Initial Feature Expansion
-        self.stem = nn.Sequential(
-            nn.Conv1d(input_dim, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
+        # --- Spatial-Spectral CNN ---
+        cnn_layers = []
+        in_ch = 2  # real + imaginary / amplitude + phase
+        for out_ch in cnn_channels:
+            cnn_layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=cnn_kernel, padding=1))
+            cnn_layers.append(nn.BatchNorm2d(out_ch))
+            cnn_layers.append(nn.ReLU())
+            in_ch = out_ch
+        self.cnn = nn.Sequential(*cnn_layers)
+
+        # Flatten CNN output for GRU input
+        n_spatial = num_antennas - 1
+        m_spectral = num_subcarriers
+        self.feature_dim = cnn_channels[-1] * n_spatial * m_spectral
+
+        # --- Temporal GRU ---
+        self.gru = nn.GRU(
+            input_size=self.feature_dim,
+            hidden_size=gru_hidden,
+            num_layers=gru_layers,
+            batch_first=True
         )
 
-        # Deep Feature Extraction (The "Brain")
-        # Captures multipath patterns at different scales
-        self.layer1 = ResBlock1D(64, 64, stride=1)
-        self.layer2 = ResBlock1D(64, 128, stride=2)
-        self.layer3 = ResBlock1D(128, 256, stride=2)
-        
-        # The Manifold Projection Head
-        # Projects high-dim features onto the low-dim topological map
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),  # Global Average Pooling
-            nn.Flatten(),             # (B, 256)
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, embedding_dim) # The final coordinate z
+        # --- Latent MLP ---
+        self.mlp = nn.Sequential(
+            nn.Linear(gru_hidden, mlp_hidden),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden, latent_dim)
         )
 
-        # Initialization (Crucial for Contrastive Learning)
-        self._initialize_weights()
+        # --- Projection head for contrastive learning ---
+        self.projection = nn.Sequential(
+            nn.Linear(latent_dim, proj_dim),
+            nn.ReLU(),
+            nn.Linear(proj_dim, proj_dim)
+        )
 
-    def forward(self, x):
-        # x: (B, C, M)
-        x = self.stem(x)
-        
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        
-        z = self.head(x)
-        
-        # Normalize to unit sphere (Hypersphere Manifold)
-        # This is standard for Triplet Loss / Contrastive Learning
-        z = F.normalize(z, p=2, dim=1)
-        return z
+    def forward(self, x, return_projection=False):
+        """
+        Forward pass for one AP.
 
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        Args:
+            x: [B, T, N-1, M, 2] preprocessed CSI
+            return_projection: if True, return contrastive projection
+
+        Returns:
+            z_q: [B, latent_dim] latent vector
+            or
+            z_proj: [B, proj_dim] projection vector
+        """
+        B, T, N, M, C = x.shape
+        # Merge time and batch for CNN
+        x = x.permute(0, 1, 4, 2, 3).contiguous()
+        x = x.view(B*T, C, N, M)
+        x = self.cnn(x)
+        x = x.view(B, T, -1)  # [B, T, feature_dim]
+
+        # GRU over time dimension
+        _, h_n = self.gru(x)
+        h_n = h_n[-1]  # take last layer
+
+        # Latent vector
+        z_q = self.mlp(h_n)
+
+        if return_projection:
+            z_proj = self.projection(z_q)
+            return z_proj
+
+        return z_q

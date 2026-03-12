@@ -1,58 +1,48 @@
 # engines/adapt_engine/stages/represent/stage.py
 
-from __future__ import annotations
-from typing import Any, Dict
 import torch
+from typing import Any, Dict
+from core.models.csi_encoder import CSIEncoder
 
 class RepresentStage:
+    """Preprocesses CSI and extracts latent features using a shared encoder."""
+
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.device = device
-        self.c_max = int(config.get("C_MAX_TAPS", 16))
-        self.data_aug = config.get("DATA_AUG", False)
-        self.q = float(config.get("AUG_SUB_RATIO", 0.2))
+        self.Q = len(config["ACCESS_POINTS"])
+        self.N = int(config.get("N_ANTENNAS", 3))
+        self.M = int(config.get("N_SUBCARRIERS", 21))
+        self.T = int(config.get("NUM_SAMPLE", 20))
 
-    def process(self, raw_csi: torch.Tensor) -> torch.Tensor:
-        """
-        Input: (B, Q, T, N, M)
-        Output: (B*Q*T, D)
-        """
+        # Shared encoder (AP-independent)
+        self.encoder = CSIEncoder().to(self.device)
+
+    def process(self, raw_csi: torch.Tensor, return_projection: bool = False) -> torch.Tensor:
+        """Transforms raw CSI into de-geometrized latent/projection vectors."""
         if raw_csi.device != self.device:
             raw_csi = raw_csi.to(self.device, non_blocking=True)
 
-        # Apply Data Augmentation if enabled
-        if self.data_aug:
-            raw_csi = self._apply_aug(raw_csi)
+        B, Q, T, N, M = raw_csi.shape
 
-        # 1. Inverse DFT to Delay Domain
-        h_delay = torch.fft.ifft(raw_csi, dim=-1)
+        # 1. Amplitude normalization
+        amplitude = torch.abs(raw_csi)
+        amplitude = amplitude / (amplitude.mean(dim=(-1, -2), keepdim=True) + 1e-8)
 
-        # 2. Truncate taps to retain large-scale fading
-        h_trunc = h_delay[..., :self.c_max].abs()
+        # 2. Phase difference extraction
+        phase = torch.angle(raw_csi)
+        phase_diff = phase[:, :, :, 1:, :] - phase[:, :, :, :-1, :]
 
-        # 3. Reshape and L2 Normalization
-        B, Q, T, N, C = h_trunc.shape
-        f_flat = h_trunc.reshape(B * Q * T, -1)
-        norm = torch.norm(f_flat, p=2, dim=-1, keepdim=True) + 1e-8
-        return f_flat / norm
+        # 3. Align amplitude with phase difference (drop the reference antenna)
+        amplitude = amplitude[:, :, :, 1:, :]
 
-    def _apply_aug(self, x: torch.Tensor) -> torch.Tensor:
-        """ Implement random hardware abstraction and noise injection """
-        B, Q, T, N, M = x.shape
-        
-        # 1. Randomly deactivate antennas
-        for b in range(B):
-            for q_idx in range(Q):
-                num_keep = torch.randint(1, N + 1, (1,)).item()
-                idx = torch.randperm(N)[:num_keep]
-                mask = torch.zeros(N, device=self.device)
-                mask[idx] = 1.0
-                x[b, q_idx] *= mask.view(1, N, 1)
+        # 4. Stack features -> [B, Q, T, N-1, M, 2]
+        features = torch.stack([amplitude, phase_diff], dim=-1)
 
-        # 2. Randomly remove subcarrier bands
-        num_remove = int(M * self.q)
-        if num_remove > 0:
-            start = torch.randint(0, M - num_remove + 1, (1,)).item()
-            x[..., start : start + num_remove] = 0.0
+        # 5. Parallel AP encoding
+        features = features.reshape(B * Q, T, N - 1, M, 2)
+        encoded = self.encoder(features, return_projection=return_projection)
 
-        # 3. Add Gaussian noise
-        return x + torch.randn_like(x) * 0.01
+        # 6. Restore AP dimension -> [B, Q, D]
+        encoded = encoded.view(B, Q, -1)
+
+        return encoded

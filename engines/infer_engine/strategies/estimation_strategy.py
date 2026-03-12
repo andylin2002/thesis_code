@@ -122,25 +122,12 @@ class ProposedEstimatorStrategy(IEstimator):
         1. AI Evaluation -> Get Weights
         2. Physics Estimation -> Use Weights -> Get Trajectory
         """
-        # Extract Physical Gain
-        mmp_gain = features[..., 4].max(dim=2).values
-
         # Get gating weight
         emission_gating: Optional[torch.Tensor] = None
-        transition_gating: Optional[torch.Tensor] = None
 
         if raw_csi_block is not None:
             try:
-                emission_gating, transition_gating = self.gating_evaluator.evaluate(
-                    raw_csi_block=raw_csi_block, 
-                    mmp_gain=mmp_gain
-                )
-
-                if emission_gating is not None:
-                    emission_gating = emission_gating * self.num_ap
-                    
-                if transition_gating is not None:
-                    transition_gating = transition_gating * self.num_ap
+                emission_gating = self.gating_evaluator.evaluate(raw_csi_block)
 
             except Exception as e:
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
@@ -152,8 +139,7 @@ class ProposedEstimatorStrategy(IEstimator):
             reference_grid=self.reference_grid,
             ap_data=self.ap_data,
             device=self.device,
-            emission_gating=emission_gating, 
-            transition_gating=transition_gating
+            emission_gating=emission_gating
         )
 
         trajectory = estimator.solve()
@@ -161,8 +147,6 @@ class ProposedEstimatorStrategy(IEstimator):
         # DEBUG OUTPUT
         self.epd = getattr(estimator, 'epd', None)
         self.stpd = getattr(estimator, 'stpd', None)
-        self.tpd = getattr(estimator, 'tpd', None)
         self.emission_gating = emission_gating
-        self.transition_gating = transition_gating
             
         return trajectory

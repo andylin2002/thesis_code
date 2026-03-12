@@ -15,7 +15,7 @@ from engines.adapt_engine.runtime import AdaptRuntime
 class AdaptWorker(BaseWorker):
     """
     AdaptWorker (Process Shell):
-    Orchestrates data flow between IPC queues and the AI runtime.
+    Orchestrates data flow between IPC queues and the online AI runtime.
     """
 
     def __init__(
@@ -45,15 +45,12 @@ class AdaptWorker(BaseWorker):
         # Hyperparameters from config
         TIME_LOG = self.config.get("TIME", False)
         SAVE_INTERVAL = self.config.get("ADAPT_SAVE_INTERVAL", 50)
-        UPDATE_INTERVAL = self.config.get("ADAPT_UPDATE_INTERVAL", 1)
         ADAPT_SLEEP = self.config.get("ADAPT_SLEEP", 0.05)
-        # Get Num Epochs for local training (Defaults to 1)
-        NUM_EPOCHS = self.config.get("NUM_EPOCHS", 1)
         
-        session_idx = 0
         while not self.stop_event.is_set():
             try:
                 try:
+                    # 1. Fetch exactly ONE fresh CSI packet
                     raw_csi_cpu = in_queue.get(timeout=0.1)
                 except Empty:
                     continue
@@ -61,46 +58,46 @@ class AdaptWorker(BaseWorker):
                 if self.runtime is None:
                     raise RuntimeError("Runtime not initialized")
 
-                # --- Inner Epoch Loop ---
-                # Re-train on the same data block NUM_EPOCHS times
-                session_idx += 1
-                for epoch_idx in range(NUM_EPOCHS):
-                    if TIME_LOG:
-                        with utils.Timer(f"{self.name} Step (Epoch {epoch_idx+1})"):
-                            metrics_pkg = self.runtime.run_step(raw_csi_cpu)
-                    else:
+                # 2. Push packet to runtime exactly ONCE (No NUM_EPOCHS loop)
+                if TIME_LOG:
+                    with utils.Timer(f"{self.name} Step"):
                         metrics_pkg = self.runtime.run_step(raw_csi_cpu)
+                else:
+                    metrics_pkg = self.runtime.run_step(raw_csi_cpu)
 
-                    # Only process if a training step was actually completed (Batch full)
-                    if metrics_pkg is not None:
-                        current_step = metrics_pkg.get("step", 0)
-                        loss = metrics_pkg.get("metrics", {}).get("loss", 0.0)
+                # 3. Process results ONLY if a full batch was trained
+                if metrics_pkg is not None:
+                    current_step = metrics_pkg.get("step", 0)
+                    loss = metrics_pkg.get("metrics", {}).get("loss", 0.0)
 
-                        # Sync Model Weights
-                        if current_step % UPDATE_INTERVAL == 0:
-                            try:
-                                state_dict_cpu = {k: v.cpu() for k, v in self.runtime.model.state_dict().items()}
-                                payload = {
-                                    "state_dict": state_dict_cpu,
-                                    "step": current_step,
-                                    "loss": loss
-                                }
-                                while not model_queue.empty():
-                                    try:
-                                        model_queue.get_nowait()
-                                    except Empty:
-                                        break
-                                model_queue.put(payload)
-                            except Exception as e:
-                                print(f"[{self.name}] Sync failed: {e}")
+                    print(f"[{self.name}] Training Step #{current_step} Finished | Loss: {loss:.4f}")
 
-                        # Auto-save logic
-                        if current_step % (self.runtime.update_interval * SAVE_INTERVAL) == 0:
-                            self.runtime.save_checkpoint(self.ckpt_path)
+                    # Sync Model Weights (Using the newly structured metrics_pkg)
+                    if metrics_pkg.get("type") == "model_update":
+                        try:
+                            payload = {
+                                "state_dict": metrics_pkg["model_state"],
+                                "step": current_step,
+                                "loss": loss
+                            }
+                            # Clear old pending models to ensure fresh weights
+                            while not model_queue.empty():
+                                try:
+                                    model_queue.get_nowait()
+                                except Empty:
+                                    break
+                            
+                            model_queue.put(payload)
+                            print(f"[{self.name}] Published updated model at step {current_step}")
+                        except Exception as e:
+                            print(f"[{self.name}] Sync failed: {e}")
+
+                    # Auto-save logic
+                    if current_step > 0 and current_step % SAVE_INTERVAL == 0:
+                        self.runtime.save_checkpoint(self.ckpt_path)
+                        print(f"[{self.name}] Checkpoint saved to {self.ckpt_path}")
                 
-                print(f"[{self.name}] Training #{session_idx} Finished | Loss: {loss:.4f}")
-
-                # Sleep only after finishing all epochs for one data block
+                # Sleep to yield CPU back to OS/other workers
                 time.sleep(ADAPT_SLEEP)
                 in_queue.task_done()
 
@@ -108,5 +105,7 @@ class AdaptWorker(BaseWorker):
                 print(f"[{self.name}] Error: {e}")
                 traceback.print_exc()
 
+        # Final save upon shutdown
         if self.runtime:
             self.runtime.save_checkpoint(self.ckpt_path)
+            print(f"[{self.name}] Final checkpoint saved. Shutting down.")

@@ -167,12 +167,9 @@ class SoftEMAlgorithm:
         final_epd_qgt = self.emission_log_probs_qgt.clone()
 
         if self.emission_gating is not None:
-            eps = torch.finfo(self.emission_gating.dtype).eps
-            safe_gating = torch.clamp(self.emission_gating, min=eps)
-            gating_log_qt = torch.log(safe_gating)
-            gating_log_q1t = gating_log_qt.unsqueeze(1)
-            final_epd_qgt = final_epd_qgt + gating_log_q1t
-
+            # likelihood exponentiation weighting
+            gating = torch.clamp(self.emission_gating, 0.0, 1.0)
+            final_epd_qgt = final_epd_qgt * gating.unsqueeze(1)
         final_epd_gt = torch.sum(final_epd_qgt, dim=0)
 
         return final_epd_gt
