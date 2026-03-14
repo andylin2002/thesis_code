@@ -69,7 +69,7 @@ def generate_reference_grid(
         y_min, y_max = y_bounds
 
     else:
-        # --- Infer bounds from AP locations ---
+        # --- bounds from AP locations ---
         x_min_ap = np.min(ap_locations_array[:, 0])
         x_max_ap = np.max(ap_locations_array[:, 0])
         y_min_ap = np.min(ap_locations_array[:, 1])
@@ -282,12 +282,12 @@ import time
 class Timer:
     """
     Usage:
-        with utils.Timer("Infer Step"):
+        with utils.Timer("Symbolic Step"):
             # target
             result = model(data)
     
     Output:
-        [Infer Step] *.* ms
+        [Symbolic Step] *.* ms
     """
     def __init__(self, name="Timer", flush=True):
         self.name = name

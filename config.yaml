@@ -7,8 +7,8 @@ LOOP: False
 TIME: False
 
 ### --- Threads --- ###
-RUN_INFER: True
-RUN_ADAPT: True
+RUN_SYM: True
+RUN_NEU: True
 
 ### --- System Mode --- ###
 #SYSTEM_MODE: 'BASELINE'
@@ -18,7 +18,7 @@ SYSTEM_MODE: 'PROPOSED'
 DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST:
-  - "Hmatrix_1"
+  - "t150_ch106_ant3"
 
 # --- Grid Generation Parameters ---
 GRID_RESOLUTION_M: 0.5
@@ -30,23 +30,23 @@ CSI_DIMENSIONS:
   NUM_SUBCARRIERS: 21                     # notation: M
   
 # --- Frequency & Inter-element Spacing ---
-CARRIER_FREQUENCY_HZ: 5180000000.0
-CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B
-ANTENNA_DISTANCE: 0.03                    # notation: d
+CARRIER_FREQUENCY_HZ: 5530000000.0        # center frequency
+CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B
+ANTENNA_DISTANCE: 0.0273                  # notation: d
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 20                           # notation: T
+NUM_SAMPLE: 20                            # notation: T
 NUM_PACKET: 1                             # notation: P
 
 # --- Baseline Angle Extractor ---
 BASELINE_AOA_METHOD: 'mmp'              # 'music' or 'mmp'
 
-### --- 3. Adapt_worker Setup --- ###
-ADAPT_SLEEP: 0.05
-ADAPT_BATCH_SIZE: 16
-ADAPT_UPDATE_INTERVAL: 1
-ADAPT_SAVE_INTERVAL: 1
-ADAPT_MIN_UPDATES: 0
+### --- 3. neural_worker Setup --- ###
+NEURAL_SLEEP: 0.05
+NEURAL_BATCH_SIZE: 16
+NEURAL_UPDATE_INTERVAL: 1
+NEURAL_SAVE_INTERVAL: 1
+NEURAL_MIN_UPDATES: 0
 
 # --- 4. Model Setup --- ###
 LR: 5e-4

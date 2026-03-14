@@ -9,8 +9,8 @@ from multiprocessing import JoinableQueue, Queue, Event, set_start_method
 
 import utils
 
-from workers.infer_worker import InferWorker
-from workers.adapt_worker import AdaptWorker
+from workers.symbolic_worker import SymbolicWorker
+from workers.neural_worker import NeuralWorker
 
 # Configuration
 CONFIG_PATH = 'config.yaml'
@@ -54,8 +54,8 @@ def main():
     config['ROUND'] = args.round
 
     # Toggles to enable or disable system workers
-    RUN_INFER = config.get('RUN_INFER', True)
-    RUN_ADAPT = config.get('RUN_ADAPT', True)
+    RUN_SYM = config.get('RUN_SYM', True)
+    RUN_NEU = config.get('RUN_NEU', True)
     
     # Generate Reference Grid
     x_bounds = config.get("X_BOUNDS")
@@ -96,8 +96,8 @@ def main():
 
     # 5. Setup IPC Queues
     queues = {
-        'data_infer': JoinableQueue(), 
-        'data_adapt': JoinableQueue(), 
+        'data_symbolic': JoinableQueue(), 
+        'data_neural': JoinableQueue(), 
         'model': Queue(),  
         'out': Queue(),       
         'debug': Queue()
@@ -107,9 +107,9 @@ def main():
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
     
-    if RUN_INFER:
-        infer_worker = InferWorker(
-            name="InferWorker",
+    if RUN_SYM:
+        symbolic_worker = SymbolicWorker(
+            name="SymbolicWorker",
             config=config,
             queues=queues,
             stop_event=stop_event,
@@ -117,19 +117,19 @@ def main():
             directions_vectors=directions_vectors
         )
 
-    if RUN_ADAPT:
-        adapt_worker = AdaptWorker(
-            name="AdaptWorker",
+    if RUN_NEU:
+        neural_worker = NeuralWorker(
+            name="NeuralWorker",
             config=config,
             queues=queues,
             stop_event=stop_event
         )
 
     # 7. Start Processes
-    if RUN_INFER:
-        infer_worker.start()
-    if RUN_ADAPT:
-        adapt_worker.start()
+    if RUN_SYM:
+        symbolic_worker.start()
+    if RUN_NEU:
+        neural_worker.start()
 
     # 8. Main Loop (Modified for iterative Injection -> Collection -> Saving)
     loop_mode = config.get('LOOP', False)
@@ -161,16 +161,16 @@ def main():
                 
                 for block in csi_blocks:
                     # Send CPU tensor to avoid CUDA IPC locks
-                    if RUN_INFER:
-                        queues['data_infer'].put(block.cpu())
-                    if RUN_ADAPT:
-                        queues['data_adapt'].put(block.cpu())
+                    if RUN_SYM:
+                        queues['data_symbolic'].put(block.cpu())
+                    if RUN_NEU:
+                        queues['data_neural'].put(block.cpu())
 
             if total_batches_in_round == 0:
                 print("[System] No data found in this round. Exiting.")
                 break
 
-            if RUN_INFER:
+            if RUN_SYM:
                 # --- Phase 2: Collection ---
                 print(f"[System] Waiting for {total_batches_in_round} results...")
                 
@@ -225,11 +225,11 @@ def main():
                 print(f"[IO] Outputs for Round {round_idx} saved to disk.")
                 
             else:
-                print("[System] Adapt-only mode: Skipping results collection.")
+                print("[System] Neural-only mode: Skipping results collection.")
 
             # Queue Join
-            if RUN_INFER: queues['data_infer'].join()
-            if RUN_ADAPT: queues['data_adapt'].join()
+            if RUN_SYM: queues['data_symbolic'].join()
+            if RUN_NEU: queues['data_neural'].join()
 
             if not loop_mode:
                 break
@@ -245,12 +245,12 @@ def main():
         while not queues['out'].empty(): queues['out'].get()
         while not queues['model'].empty(): queues['model'].get()
         
-        if RUN_INFER:
-            infer_worker.join(timeout=2)
-            if infer_worker.is_alive(): infer_worker.terminate()
-        if RUN_ADAPT:
-            adapt_worker.join(timeout=2)
-            if adapt_worker.is_alive(): adapt_worker.terminate()
+        if RUN_SYM:
+            symbolic_worker.join(timeout=2)
+            if symbolic_worker.is_alive(): symbolic_worker.terminate()
+        if RUN_NEU:
+            neural_worker.join(timeout=2)
+            if neural_worker.is_alive(): neural_worker.terminate()
         
         print("[System] Shutdown complete.")
 
