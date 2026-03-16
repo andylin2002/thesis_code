@@ -12,6 +12,8 @@ from engines.neural_engine.stages.train import TrainStage
 
 
 class NeuralRuntime:
+    """Parameter Server: Runs async training and publishes model states."""
+    
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.config = config
         self.device = device
@@ -29,7 +31,7 @@ class NeuralRuntime:
     def setup(self) -> None:
         self.load = LoadStage(self.config, self.device)
         self.repr = RepresentStage(self.config, self.device)
-        self.train = TrainStage(self.config, self.device, self.repr.encoder)
+        self.train = TrainStage(self.config, self.device, self.repr.encoder, self.repr.attention)
     
     @property
     def model(self):
@@ -49,10 +51,11 @@ class NeuralRuntime:
 
         # Phase 2: Represent (Physics Transformation)
         batch_gpu = batch_tensor.to(self.device, non_blocking=True)
-        features = self.repr.process(batch_gpu, return_projection=True)
+        # Unpack both latent features and attention weights
+        features, viterbi_weights = self.repr.process(batch_gpu)
 
-        # Phase 3: Train (Model Learning)
-        metrics = self.train.step(features)
+        # Phase 3: Train (Uncertainty-Weighted Predictive Learning)
+        metrics = self.train.step(features, viterbi_weights)
         
         self.steps += 1
 
@@ -63,12 +66,13 @@ class NeuralRuntime:
         )
 
         if should_publish:
+            # Exports {encoder: ..., attention: ..., predictor: ...}
             state_dict = self.train.get_state_dict()
             
             return {
                 "type": "model_update",
                 "step": self.steps,
-                "model_state": state_dict,
+                "state_dict": state_dict,
                 "metrics": metrics
             }
         
@@ -79,14 +83,12 @@ class NeuralRuntime:
         }
     
     def save_checkpoint(self, filepath: str) -> None:
-        """Saves model, optimizer, steps, and config."""
+        """Saves models, optimizer, steps, and config."""
         if self.train is None: 
             return
-        else:
-            state_dict = self.train.get_state_dict()
 
         checkpoint = {
-            "model_state": state_dict,
+            "state_dict": self.train.get_state_dict(),
             "optimizer_state": self.train.optimizer.state_dict(),
             "step": self.steps,
             "config": self.config
@@ -104,8 +106,12 @@ class NeuralRuntime:
         try:
             checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
             
-            # Restore state
-            self.train.encoder.load_state_dict(checkpoint["model_state"])
+            # Restore all three sub-modules from the nested state dictionary
+            state_dict = checkpoint["state_dict"]
+            self.train.encoder.load_state_dict(state_dict["encoder"])
+            self.train.attention.load_state_dict(state_dict["attention"])
+            self.train.predictor.load_state_dict(state_dict["predictor"])
+            
             self.train.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.steps = checkpoint.get("step", 0)
 

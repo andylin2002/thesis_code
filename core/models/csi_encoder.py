@@ -1,31 +1,31 @@
 # core/models/csi_encoder.py
 
+import torch
 import torch.nn as nn
 
 class CSIEncoder(nn.Module):
     """
-    CSIEncoder for one AP.
-    Input: [B, T, N-1, M, 2]  (preprocessed CSI: amplitude + phase difference)
-    Output: latent vector z_q or projection vector for contrastive learning
+    CSIEncoder: Extracts spatial-spectral features and preserves the temporal dimension (T).
+    Input:  [Batch*Q, T, N-1, M, 2]
+    Output: [Batch*Q, T, latent_dim]
     """
-
     def __init__(
         self,
-        num_antennas=3,
-        num_subcarriers=21,
-        cnn_channels=[16, 32],
-        cnn_kernel=(3, 3),
-        gru_hidden=64,
-        gru_layers=1,
-        mlp_hidden=32,
-        latent_dim=16,
-        proj_dim=16
+        num_antennas: int,
+        num_subcarriers: int,
+        cnn_channels: list = [16, 32],
+        cnn_kernel: tuple = (3, 3),
+        gru_hidden: int = 64,
+        gru_layers: int = 1,
+        mlp_hidden: int = 32,
+        latent_dim: int = 128,
+        proj_dim: int = 64
     ):
         super().__init__()
 
-        # --- Spatial-Spectral CNN ---
+        # 1. Spatial-Spectral CNN
         cnn_layers = []
-        in_ch = 2  # real + imaginary / amplitude + phase
+        in_ch = 2  # Amplitude and phase difference
         for out_ch in cnn_channels:
             cnn_layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=cnn_kernel, padding=1))
             cnn_layers.append(nn.BatchNorm2d(out_ch))
@@ -33,12 +33,12 @@ class CSIEncoder(nn.Module):
             in_ch = out_ch
         self.cnn = nn.Sequential(*cnn_layers)
 
-        # Flatten CNN output for GRU input
+        # Calculate flattened feature dimension
         n_spatial = num_antennas - 1
         m_spectral = num_subcarriers
         self.feature_dim = cnn_channels[-1] * n_spatial * m_spectral
 
-        # --- Temporal GRU ---
+        # 2. Temporal GRU
         self.gru = nn.GRU(
             input_size=self.feature_dim,
             hidden_size=gru_hidden,
@@ -46,49 +46,37 @@ class CSIEncoder(nn.Module):
             batch_first=True
         )
 
-        # --- Latent MLP ---
+        # 3. Latent MLP
         self.mlp = nn.Sequential(
             nn.Linear(gru_hidden, mlp_hidden),
             nn.ReLU(),
             nn.Linear(mlp_hidden, latent_dim)
         )
 
-        # --- Projection head for contrastive learning ---
+        # 4. Projection Head (Optional for contrastive tasks)
         self.projection = nn.Sequential(
             nn.Linear(latent_dim, proj_dim),
             nn.ReLU(),
             nn.Linear(proj_dim, proj_dim)
         )
 
-    def forward(self, x, return_projection=False):
-        """
-        Forward pass for one AP.
-
-        Args:
-            x: [B, T, N-1, M, 2] preprocessed CSI
-            return_projection: if True, return contrastive projection
-
-        Returns:
-            z_q: [B, latent_dim] latent vector
-            or
-            z_proj: [B, proj_dim] projection vector
-        """
-        B, T, N, M, C = x.shape
-        # Merge time and batch for CNN
-        x = x.permute(0, 1, 4, 2, 3).contiguous()
-        x = x.view(B*T, C, N, M)
-        x = self.cnn(x)
-        x = x.view(B, T, -1)  # [B, T, feature_dim]
-
-        # GRU over time dimension
-        _, h_n = self.gru(x)
-        h_n = h_n[-1]  # take last layer
-
-        # Latent vector
-        z_q = self.mlp(h_n)
-
+    def forward(self, x: torch.Tensor, return_projection: bool = False) -> torch.Tensor:
+        B_flat, T, N, M, C = x.shape
+        
+        # Extract spatial features for each time step independently
+        x_cnn = x.permute(0, 1, 4, 2, 3).contiguous()  # [B_flat, T, C, N, M]
+        x_cnn = x_cnn.view(B_flat * T, C, N, M)
+        
+        cnn_out = self.cnn(x_cnn)
+        cnn_out = cnn_out.view(B_flat, T, -1)  # Restore temporal dimension T
+        
+        # Process sequence temporally (keep all T steps)
+        gru_out, _ = self.gru(cnn_out)  # gru_out: [B_flat, T, gru_hidden]
+        
+        # Map to latent space (Linear layer applies automatically to the last dimension)
+        z_q = self.mlp(gru_out)  # z_q: [B_flat, T, latent_dim]
+        
         if return_projection:
-            z_proj = self.projection(z_q)
-            return z_proj
-
+            return self.projection(z_q)  # [B_flat, T, proj_dim]
+            
         return z_q

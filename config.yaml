@@ -8,7 +8,7 @@ TIME: False
 
 ### --- Threads --- ###
 RUN_SYM: True
-RUN_NEU: True
+RUN_NEU: False
 
 ### --- System Mode --- ###
 #SYSTEM_MODE: 'BASELINE'
@@ -18,7 +18,7 @@ SYSTEM_MODE: 'PROPOSED'
 DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST:
-  - "t150_ch106_ant3"
+  - "t150_ch136_ant3"
 
 # --- Grid Generation Parameters ---
 GRID_RESOLUTION_M: 0.5
@@ -27,15 +27,15 @@ BUFFER_DISTANCE_M: 0
 ### --- 2. System Setup --- ###
 CSI_DIMENSIONS:
   NUM_RX_ANTENNAS: 3                      # notation: N
-  NUM_SUBCARRIERS: 21                     # notation: M
+  NUM_SUBCARRIERS: 21                     # notation: M       ch36: 21,       ch106: 81
   
 # --- Frequency & Inter-element Spacing ---
-CARRIER_FREQUENCY_HZ: 5530000000.0        # center frequency
-CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B
-ANTENNA_DISTANCE: 0.0273                  # notation: d
+CARRIER_FREQUENCY_HZ: 5180000000.0        # center frequency  ch36: 518,      ch106: 553
+CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B       ch36: 20,       ch106: 80
+ANTENNA_DISTANCE: 0.02899                  # notation: d       ch36: 0.02899,  ch106: 0.0273
 
 # --- Packeting & Aggregation ---
-NUM_SAMPLE: 20                            # notation: T
+NUM_SAMPLE: 15                            # notation: T
 NUM_PACKET: 1                             # notation: P
 
 # --- Baseline Angle Extractor ---
@@ -50,13 +50,9 @@ NEURAL_MIN_UPDATES: 0
 
 # --- 4. Model Setup --- ###
 LR: 5e-4
-EMBED_DIM: 16
-CONTRASTIVE_TAU: 0.07
-CONSENSUS_WEIGHT: 0.5
+LATENT_DIM: 128
+ENTROPY_LAMBDA: 0.0 
 
 C_MAX_TAPS: 16
 DATA_AUG: False
 AUG_SUB_RATIO: 0.2
-
-### --- 5. Gating Setup --- ###
-GATING_TEMP: 0.002

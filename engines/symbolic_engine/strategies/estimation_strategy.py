@@ -103,11 +103,8 @@ class ProposedEstimatorStrategy(IEstimator):
         """
         Updates the AI model weights on-the-fly (e.g., from neural_worker).
         """
-        if state_dict is not None and self.gating_evaluator.model is not None:
-            try:
-                self.gating_evaluator.model.load_state_dict(state_dict, strict=False)
-            except Exception as e:
-                print(f"[ProposedStrategy] Model update failed: {e}")
+        if state_dict is not None:
+            self.gating_evaluator.load_state_dict(state_dict)
 
     # =========================================================
     # Main estimation

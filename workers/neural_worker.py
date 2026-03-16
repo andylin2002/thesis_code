@@ -76,7 +76,7 @@ class NeuralWorker(BaseWorker):
                     if metrics_pkg.get("type") == "model_update":
                         try:
                             payload = {
-                                "state_dict": metrics_pkg["model_state"],
+                                "state_dict": metrics_pkg["state_dict"],
                                 "step": current_step,
                                 "loss": loss
                             }

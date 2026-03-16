@@ -1,91 +1,86 @@
 # engines/symbolic_engine/stages/gating_evaluation/evaluator.py
 
-import os
 import torch
-import torch.nn.functional as F
-from typing import Optional
+from typing import Dict, Any
 
 from core.models.csi_encoder import CSIEncoder
-from engines.neural_engine.stages.represent import RepresentStage
+from engines.neural_engine.stages.represent import CrossAPAttention
 
 class GatingEvaluator:
     """
-    Evaluates LoS/NLoS reliability using Temporal Cosine Similarity.
-    Applies Competitive Softmax and scales by Q, so weights sum to Q across APs.
+    Real-time inference client. 
+    Receives updated weights from the Neural Engine and outputs Viterbi emission weights.
     """
-    def __init__(self, config: dict, device: torch.device):
+    def __init__(self, config: Dict[str, Any], device: torch.device):
         self.config = config
         self.device = device
         
-        self.represent_stage = RepresentStage(config, device)
-        self.model = self._build_model()
+        self.N = int(config['CSI_DIMENSIONS']['NUM_RX_ANTENNAS'])
+        self.M = int(config['CSI_DIMENSIONS']['NUM_SUBCARRIERS'])
+        self.D = int(config.get("LATENT_DIM", 128))
 
-    def _build_model(self) -> torch.nn.Module:
-        n_ant = int(self.config.get('N_ANTENNAS', 3))
-        n_sub = int(self.config.get('N_SUBCARRIERS', 21))
+        # 1. Instantiate only the required inference modules
+        self.encoder = CSIEncoder(
+            num_antennas=self.N, 
+            num_subcarriers=self.M,
+            latent_dim=self.D
+        ).to(self.device)
         
-        model = CSIEncoder(num_antennas=n_ant, num_subcarriers=n_sub).to(self.device)
-        
-        scene_name = self.config.get("SCENARIO_NAME", "default_scene")
-        ckpt_path = os.path.join("checkpoint", f"{scene_name}.ckpt")
-        
-        if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=True)
-            model.load_state_dict(ckpt.get('model_state', ckpt))
-        else:
-            print(f"[GatingEvaluator] Warning: No checkpoint at {ckpt_path}.")
-            
-        model.eval()
-        return model
+        self.attention = CrossAPAttention(feature_dim=self.D).to(self.device)
+
+        # 2. Lock models in evaluation mode (disables dropout/batchnorm updates)
+        self.encoder.eval()
+        self.attention.eval()
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Hot-swaps model weights dynamically from the queue payload."""
+        try:
+            # Extract the specific sub-module weights
+            self.encoder.load_state_dict(state_dict["encoder"])
+            self.attention.load_state_dict(state_dict["attention"])
+            print("[GatingEvaluator] AI weights successfully hot-swapped.")
+        except Exception as e:
+            print(f"[GatingEvaluator] Failed to load state dict: {e}")
 
     @torch.no_grad()
     def evaluate(self, raw_csi_block: torch.Tensor) -> torch.Tensor:
         """
-        Output: gating_weights [B, Q, T] where sum(gating_weights, dim=1) == Q
+        Args:
+            raw_csi_block: [B, Q, T, N, M]
+        Returns:
+            viterbi_weights: [B, T, Q] (Softmax probabilities summing to 1 over Q)
         """
+        if raw_csi_block.device != self.device:
+            raw_csi_block = raw_csi_block.to(self.device)
+
         is_single_block = (raw_csi_block.dim() == 4)
         if is_single_block:
             raw_csi_block = raw_csi_block.unsqueeze(0)
-            
+
         B, Q, T, N, M = raw_csi_block.shape
-        
-        # 1. Flatten temporal dimension -> [B*T, Q, 1, N, M]
-        flat_csi = raw_csi_block.transpose(1, 2).reshape(B * T, Q, 1, N, M)
-        
-        # 2. Map to Projection Space
-        frame_Z = self.represent_stage.process(flat_csi, return_projection=True)
-        
-        # 3. Restore temporal dimension -> [B, Q, T, D]
-        D = frame_Z.shape[-1]
-        frame_Z = frame_Z.view(B, T, Q, D).transpose(1, 2)
-        
-        # 4. Compute Competitive Gating Weights
-        gating_weights = self._compute_competitive_softmax(frame_Z)
 
+        # --- 1. Lightweight Preprocessing ---
+        amplitude = torch.abs(raw_csi_block)
+        amplitude = amplitude / (amplitude.mean(dim=(-1, -2), keepdim=True) + 1e-8)
+        
+        phase = torch.angle(raw_csi_block)
+        phase_diff = phase[:, :, :, 1:, :] - phase[:, :, :, :-1, :]
+        amplitude = amplitude[:, :, :, 1:, :]
+
+        features = torch.stack([amplitude, phase_diff], dim=-1)
+        
+        # --- 2. Forward Pass ---
+        features = features.reshape(B * Q, T, N - 1, M, 2)
+        encoded = self.encoder(features, return_projection=False)  # [B*Q, T, D]
+        
+        # Reshape to explicit spatial-temporal format
+        encoded = encoded.view(B, Q, T, -1).permute(0, 2, 1, 3)  # [B, T, Q, D]
+
+        # --- 3. Compute Weights ---
+        viterbi_weights = self.attention(encoded)  # [B, T, Q]
+
+        # --- 4. Output ---
         if is_single_block:
-            gating_weights = gating_weights.squeeze(0)
-        
-        return gating_weights
-
-    def _compute_competitive_softmax(self, Z: torch.Tensor) -> torch.Tensor:
-        """
-        Calculates Temporal Cosine Similarity, applies Softmax, and scales by Q.
-        """
-        B, Q, T, D = Z.shape
-        
-        # 1. Temporal Cosine Similarity (Z_t compared to Z_{t-1})
-        Z_prev = torch.cat([Z[:, :, 0:1, :], Z[:, :, :-1, :]], dim=2)
-        cos_sim = F.cosine_similarity(Z, Z_prev, dim=-1) # [B, Q, T]
-        
-        # 2. Temperature scaling to sharpen the differences
-        # Make sure GATING_TEMP in config.yaml is small (e.g., 0.01)
-        tau = float(self.config.get('GATING_TEMP', 0.01))
-        scaled_sim = cos_sim / tau
-        
-        # 3. Competitive Allocation: Softmax across the AP dimension (dim=1)
-        softmax_weights = F.softmax(scaled_sim, dim=1)
-        
-        # 4. Scale by Q to preserve the overall Emission Log-Likelihood budget
-        gating_weights = softmax_weights * Q
-        
-        return gating_weights
+            return viterbi_weights[0].transpose(0, 1)
+        else:
+            return viterbi_weights.transpose(1, 2)
