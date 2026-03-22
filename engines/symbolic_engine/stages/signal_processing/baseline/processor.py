@@ -69,7 +69,7 @@ class BaselineProcessor:
             )
 
         # --- Delay ---
-        delay_flat = delay_estimator.estimate_delay_batch(num_batch, batch_input_csi)
+        delay_flat = delay_estimator.estimate_delay_batch(batch_input_csi)
 
         # Stacking & Reshape
         # Feature combo: [Power, Angle, Delay]

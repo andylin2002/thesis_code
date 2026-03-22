@@ -3,8 +3,6 @@
 import torch
 from typing import Dict, Any, Optional
 
-from scipy.signal import savgol_filter
-
 # Import Physics Engine (SoftEM) and Utils
 from .soft_em import SoftEMAlgorithm
 from . import soft_em_utils
@@ -76,42 +74,13 @@ class ProposedEstimator:
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler
-        raw_trajectory, _ = self.viterbi.run(
+        trajectory, _ = self.viterbi.run(
             emission_log_probs=self.epd,
             neighbor_index_matrix=self.neighbor_matrix,
             get_max_previous_score=soft_em_utils.get_max_previous_score,
             transition_log_probs=self.tpd
         )
 
-        self.trajectory = self._apply_physics_smoothing(raw_trajectory)
+        self.trajectory = trajectory
 
         return self.trajectory
-    
-    def _apply_physics_smoothing(self, raw_coords: torch.Tensor) -> torch.Tensor:
-        """
-        Apply Savitzky-Golay filter to smooth the trajectory, enforcing inertia.
-        Input: raw_coords (Tensor [T, 2]) on GPU
-        Output: smooth_coords (Tensor [T, 2]) on GPU
-        """
-        # 1. Convert to CPU Numpy
-        coords_np = raw_coords.detach().cpu().numpy()
-        T = coords_np.shape[0]
-
-        # 2. Parameters Setup
-        window_length = 11
-        polyorder = 2
-
-        if T <= window_length:
-            return raw_coords
-
-        try:
-            # 3. Apply Filter
-            smooth_np = savgol_filter(coords_np, window_length, polyorder, axis=0)
-            
-            # 4. Convert back to Tensor
-            smooth_coords = torch.from_numpy(smooth_np).to(raw_coords.device).type(raw_coords.dtype)
-            return smooth_coords
-
-        except Exception as e:
-            print(f"[Warning] Smoothing failed: {e}. Using raw trajectory.")
-            return raw_coords
