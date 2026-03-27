@@ -68,8 +68,7 @@ class SymbolicRuntime:
         epd = getattr(self.location_estimator, "epd", None)
         stpd = getattr(self.location_estimator, "stpd", None)
         tpd = getattr(self.location_estimator, "tpd", None)
-        emission_gating = getattr(self.location_estimator, "emission_gating", None)
-        transition_gating = getattr(self.location_estimator, "transition_gating", None)
+        reliability = getattr(self.location_estimator, "reliability", None)
     
 
         # Package (future-proof: dict payload)
@@ -79,8 +78,7 @@ class SymbolicRuntime:
             "stpd": stpd, 
             "tpd": tpd, 
             "features": features,
-            "emission_gating": emission_gating, 
-            "transition_gating": transition_gating
+            "reliability": reliability
         }
 
         # Convert to CPU-safe package

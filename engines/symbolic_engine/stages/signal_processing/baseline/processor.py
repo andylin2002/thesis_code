@@ -81,7 +81,7 @@ class BaselineProcessor:
 
         features = features_stacked_flat.reshape(self.num_ap, self.num_sample, 3)
 
-        DEBUG = True
+        DEBUG = False
         if DEBUG:
             self._save_debug_info(features)
 

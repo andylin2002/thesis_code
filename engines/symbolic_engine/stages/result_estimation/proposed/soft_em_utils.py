@@ -124,6 +124,7 @@ def calculate_grid_neighbor_delay_diff_qgk(
 # ==========================================
 
 def calculate_emission_log_probs(
+    config: Dict[str, Any], 
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
     grid_angle_qg: torch.Tensor, 
@@ -150,7 +151,7 @@ def calculate_emission_log_probs(
     log_rel_tof = _calculate_log_tof_reliability(obs_tof_cand, obs_tof_sprd, tof_params)
 
     log_path_scores = log_rel_gain + log_rel_tof
-    log_reliability_weights = torch.log_softmax(log_path_scores, dim=-1)
+    log_weights = torch.log_softmax(log_path_scores, dim=-1)
 
     # 2. Gaussian Parameters (Variance & Mean)
     # Variance dynamic adjustment
@@ -165,7 +166,11 @@ def calculate_emission_log_probs(
     log_prob_aoa = _gaussian_log_pdf_angular(obs_aoa_cand.unsqueeze(1), mean_aoa, var_aoa)
     
     # Mixture Integration (LogSumExp over Candidates)
-    emission_log_probs_qgt = torch.logsumexp(log_prob_aoa + log_reliability_weights.unsqueeze(1), dim=-1)
+    use_tof_gain_weight = config.get("USE_TOF_GAIN_WEIGHT", True)
+    if use_tof_gain_weight:
+        emission_log_probs_qgt = torch.logsumexp(log_prob_aoa + log_weights.unsqueeze(1), dim=-1)
+    else:
+        emission_log_probs_qgt = torch.logsumexp(log_prob_aoa, dim=-1)
 
     return emission_log_probs_qgt
 

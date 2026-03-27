@@ -18,28 +18,25 @@ SYSTEM_MODE: 'BASELINE'
 DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST:
-  - "LoS_t150_ch106_ant3"
+  - "NLoS_t150_ch36_ant3" #NLoS_t150_ch36_ant3, train_direct, NLoS_t799_ch36_ant3
 
-# --- Grid Generation Parameters ---
+### --- Grid Generation Parameters --- ###
 GRID_RESOLUTION_M: 0.5
 BUFFER_DISTANCE_M: 0
 
 ### --- 2. System Setup --- ###
 CSI_DIMENSIONS:
-  NUM_RX_ANTENNAS: 3                      # notation: N
+  NUM_RX_ANTENNAS: 8                      # notation: N
   NUM_SUBCARRIERS: 81                     # notation: M       ch36: 21,       ch106: 81
   
-# --- Frequency & Inter-element Spacing ---
+### --- Frequency & Inter-element Spacing --- ###
 CARRIER_FREQUENCY_HZ: 5530000000.0        # center frequency  ch36: 518,      ch106: 553
 CHANNEL_BANDWIDTH_HZ: 80000000.0          # notation: B       ch36: 20,       ch106: 80
 ANTENNA_DISTANCE: 0.0273                  # notation: d       ch36: 0.02899,  ch106: 0.0273
 
-# --- Packeting & Aggregation ---
+### --- Packeting & Aggregation --- ###
 NUM_SAMPLE: 15                            # notation: T
 NUM_PACKET: 1                             # notation: P
-
-# --- Baseline Angle Extractor ---
-BASELINE_AOA_METHOD: 'music'              # 'music' or 'mmp'
 
 ### --- 3. neural_worker Setup --- ###
 NEURAL_SLEEP: 0.05
@@ -48,7 +45,7 @@ NEURAL_UPDATE_INTERVAL: 1
 NEURAL_SAVE_INTERVAL: 1
 NEURAL_MIN_UPDATES: 0
 
-# --- 4. Model Setup --- ###
+### --- 4. Model Setup --- ###
 LR: 5e-4
 LATENT_DIM: 128
 ENTROPY_LAMBDA: 0.0 
@@ -56,3 +53,14 @@ ENTROPY_LAMBDA: 0.0
 C_MAX_TAPS: 16
 DATA_AUG: False
 AUG_SUB_RATIO: 0.2
+
+### --- Ablation Study --- ###
+BASELINE_AOA_METHOD: 'music'              # 'music' or 'mmp'
+USE_SOFT_EM: True
+USE_TOF_GAIN_WEIGHT: True
+
+
+PROB_TARGET_LAMBDA: 5.0
+VAR_REG_LAMBDA: 0.005
+TARGET_TEMPERATURE: 0.2
+LABEL_SMOOTHING: 0.02

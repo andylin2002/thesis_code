@@ -88,12 +88,6 @@ def main():
 
     hmatrix_list = config.get('HMATRIX_LIST', [])
 
-    # Save Grid for Debug
-    grid_np = utils.to_numpy(reference_grid)
-    if grid_np is not None:
-        np.save("output/grid.npy", grid_np)
-        print(f"[IO] Reference Grid saved. Shape: {grid_np.shape}")
-
     # 5. Setup IPC Queues
     queues = {
         'data_symbolic': JoinableQueue(), 
@@ -179,8 +173,7 @@ def main():
                 round_epds = []
                 round_stpds = []
                 round_tpds = []
-                round_egs = []
-                round_tgs = []
+                round_rels = []
 
                 received_count = 0
                 while received_count < total_batches_in_round:
@@ -191,16 +184,16 @@ def main():
                         # Data Collection
                         traj = utils.to_numpy(payload.get("trajectory"))
                         if traj is not None: round_trajectories.append(traj)
+                        '''
                         epd = utils.to_numpy(payload.get("epd"))
                         if epd is not None: round_epds.append(epd)
                         stpd = utils.to_numpy(payload.get("stpd"))
                         if stpd is not None: round_stpds.append(stpd)
                         tpd = utils.to_numpy(payload.get("tpd"))
                         if tpd is not None: round_tpds.append(tpd)
-                        eg = utils.to_numpy(payload.get("emission_gating"))
-                        if eg is not None: round_egs.append(eg)
-                        tg = utils.to_numpy(payload.get("transition_gating"))
-                        if tg is not None: round_tgs.append(tg)
+                        rel = utils.to_numpy(payload.get("reliability"))
+                        if rel is not None: round_rels.append(rel)
+                        '''
 
                     except Exception as e:
                         print(f"\n[System] Collection Error: {e}")
@@ -212,17 +205,16 @@ def main():
                 # Saving
                 if round_trajectories:
                     np.save("output/predicted_trajectory.npy", np.concatenate(round_trajectories, axis=0))
+                '''
                 if round_epds:
                     np.save("output/epd.npy", np.concatenate(round_epds, axis=1))
                 if round_stpds:
                     np.save("output/stpd.npy", np.concatenate(round_stpds, axis=1))
                 if round_tpds:
                     np.save("output/tpd.npy", np.concatenate(round_tpds, axis=0))
-                if round_egs:
-                    np.save("output/emission_gating.npy", np.stack(round_egs, axis=0))
-                if round_tgs:
-                    np.save("output/transition_gating.npy", np.stack(round_tgs, axis=0))
-                print(f"[IO] Outputs for Round {round_idx} saved to disk.")
+                if round_rels:
+                    np.save("output/reliability.npy", np.stack(round_rels, axis=0))
+                '''
                 
             else:
                 print("[System] Neural-only mode: Skipping results collection.")

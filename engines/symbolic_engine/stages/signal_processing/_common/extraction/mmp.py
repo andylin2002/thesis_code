@@ -155,6 +155,8 @@ class MMPAlgorithm:
         L_multipath = math.ceil(L_multipath_float)
         L_multipath = int(torch.clamp(torch.tensor(L_multipath), min=1, max=col).item())
 
+        L_multipath = 1
+
     ##### --- Get Us ---
         Us = U[:, :, :L_multipath]
 

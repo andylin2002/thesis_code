@@ -95,16 +95,32 @@ class ProposedEstimatorStrategy(IEstimator):
             'neighbor_matrix': neighbor_matrix, 
             'grid_neighbor_delay_diff_qgk': grid_neighbor_delay_diff_qgk,
         }
+
+        #DEBUG
+        self.latest_gating_step = None
+        self.gating_ap_probs = None
+        self.gating_scores = None
+        self.gating_debug = None
+        self.reliability = None
     
     # =========================================================
     # Public API for Symbolic Worker
     # =========================================================
+    '''
     def set_gating_state_dict(self, state_dict: Optional[dict]) -> None:
         """
         Updates the AI model weights on-the-fly (e.g., from neural_worker).
         """
         if state_dict is not None:
             self.gating_evaluator.load_state_dict(state_dict)
+    '''
+    def set_gating_state_dict(self, state_dict: Optional[dict], step: Optional[int] = None) -> None:
+        if state_dict is None:
+            print("[ProposedStrategy] Received empty gating state_dict.")
+            return
+
+        self.gating_evaluator.load_state_dict(state_dict)
+        self.latest_gating_step = step
 
     # =========================================================
     # Main estimation
@@ -120,11 +136,11 @@ class ProposedEstimatorStrategy(IEstimator):
         2. Physics Estimation -> Use Weights -> Get Trajectory
         """
         # Get gating weight
-        emission_gating: Optional[torch.Tensor] = None
+        reliability: Optional[torch.Tensor] = None
 
         if raw_csi_block is not None:
             try:
-                emission_gating = self.gating_evaluator.evaluate(raw_csi_block)
+                reliability = self.gating_evaluator.evaluate(raw_csi_block, False)
 
             except Exception as e:
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
@@ -136,7 +152,7 @@ class ProposedEstimatorStrategy(IEstimator):
             reference_grid=self.reference_grid,
             ap_data=self.ap_data,
             device=self.device,
-            emission_gating=emission_gating
+            reliability=reliability
         )
 
         trajectory = estimator.solve()
@@ -144,6 +160,6 @@ class ProposedEstimatorStrategy(IEstimator):
         # DEBUG OUTPUT
         self.epd = getattr(estimator, 'epd', None)
         self.stpd = getattr(estimator, 'stpd', None)
-        self.emission_gating = emission_gating
+        self.reliability = reliability
             
         return trajectory

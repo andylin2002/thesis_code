@@ -19,16 +19,14 @@ class ProposedEstimator:
         reference_grid: torch.Tensor,
         ap_data: Dict[str, Any],      # Pre-calculated AP info
         device: torch.device,
-        emission_gating: Optional[torch.Tensor] = None,
-        transition_gating: Optional[torch.Tensor] = None
+        reliability: Optional[torch.Tensor] = None,
     ):
         self.features = features
         self.config = config
         self.reference_grid = reference_grid
         self.ap_data = ap_data
         self.device = device
-        self.emission_gating = emission_gating
-        self.transition_gating = transition_gating
+        self.reliability = reliability
         
         self.num_sample = config['NUM_SAMPLE']
         self.G = reference_grid.shape[0]
@@ -64,8 +62,13 @@ class ProposedEstimator:
         # --- Step 1: Physics Parameter Optimization (SoftEM) ---
         # This function runs the internal EM loop until parameters converge.
         # Process: Init -> [Calc EPD -> Calc Gamma -> Update Params] * N -> Converged Parameters
-        self.softem.set_emission_gating(self.emission_gating)
-        self.softem.step_parameters()
+        self.softem.set_reliability(self.reliability)
+        
+        use_soft_em = self.config.get("USE_SOFT_EM", True)
+        if use_soft_em:
+            self.softem.step_parameters()
+        else:
+            self.softem.build_initial_state_only()
         
         # --- Step 2: Retrieve the Calculated EPD & STPD ---
         self.epd = self.softem.get_final_epd()

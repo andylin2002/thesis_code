@@ -51,16 +51,10 @@ class SoftEMAlgorithm:
 
         self.emission_log_probs_qgt: Optional[torch.Tensor] = None
         self.spatiotemporal_probs_gt: Optional[torch.Tensor] = None
-        self.emission_gating: Optional[torch.Tensor] = None
+        self.reliability: Optional[torch.Tensor] = None
 
         # Pre-calculate Parameters using in tof penalty calculation
         self.tof_params = self._calculate_tof_params()
-
-        # DEBUG
-        output_nm_path = "output/neighbor_matrix.npy"
-        if not os.path.exists(output_nm_path):
-            nm_np = self.neighbor_matrix.detach().cpu().numpy()
-            np.save(output_nm_path, nm_np)
 
     def initialize_params(self) -> TypePropParams:
         """
@@ -90,6 +84,7 @@ class SoftEMAlgorithm:
 
             # 1. E-Step: Calculate Emission Probability Distribution
             self.emission_log_probs_qgt = soft_em_utils.calculate_emission_log_probs(
+                self.config, 
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
@@ -135,43 +130,34 @@ class SoftEMAlgorithm:
         
         return max_diff < 1e-4
     
-    def set_emission_gating(self, emission_gating: Optional[torch.Tensor]) -> None:
-        """
-        emission_gating: (Q, T) in [0,1] or None
-        - None => disable gating (pure physics / equal voting)
-        """
-        if emission_gating is None:
-            self.emission_gating = None
+    def set_reliability(self, reliability: Optional[torch.Tensor]) -> None:
+        if reliability is None:
+            self.reliability = None
             return
 
-        if not isinstance(emission_gating, torch.Tensor):
-            raise TypeError("emission_gating must be a torch.Tensor or None")
+        if not isinstance(reliability, torch.Tensor):
+            reliability = torch.as_tensor(reliability, dtype=torch.float32, device=self.device)
+        else:
+            reliability = reliability.to(device=self.device, dtype=torch.float32)
 
-        Q, T = self.features.size(0), self.features.size(1)
-        if emission_gating.shape != (Q, T):
+        if reliability.shape != (self.num_ap, self.num_sample):
             raise ValueError(
-                f"emission_gating shape mismatch: expected (Q,T)=({Q},{T}), got {tuple(emission_gating.shape)}"
+                f"[SoftEM] reliability shape mismatch: "
+                f"expected {(self.num_ap, self.num_sample)}, got {tuple(reliability.shape)}"
             )
 
-        eg = emission_gating.to(device=self.device, dtype=torch.float32)
-
-        eg = eg.clamp(0.0, 1.0)
-
-        self.emission_gating = eg
+        self.reliability = reliability
 
     def get_final_epd(self) -> torch.Tensor:
-        """ Returns the EPD from the last iteration. """
         if self.emission_log_probs_qgt is None:
             raise RuntimeError("Run step_parameters() first!")
-        
+
         final_epd_qgt = self.emission_log_probs_qgt.clone()
 
-        if self.emission_gating is not None:
-            # likelihood exponentiation weighting
-            gating = torch.clamp(self.emission_gating, 0.0, 1.0)
-            final_epd_qgt = final_epd_qgt * gating.unsqueeze(1)
-        final_epd_gt = torch.sum(final_epd_qgt, dim=0)
+        if self.reliability is not None:
+            final_epd_qgt = final_epd_qgt * self.reliability.unsqueeze(1)
 
+        final_epd_gt = torch.sum(final_epd_qgt, dim=0)
         return final_epd_gt
     
     def get_final_stpd(self) -> torch.Tensor:
@@ -212,3 +198,26 @@ class SoftEMAlgorithm:
             'tof_limit_sec': dist_limit / LIGHT_SPEED, 
             'tof_penalty_strength': penalty_strength
         }
+    
+    def build_initial_state_only(self):
+        """
+        Build initial EPD/STPD without running Soft-EM updates.
+        """
+        if self.propagation_params is None:
+            self.initialize_params()
+
+        self.emission_log_probs_qgt = soft_em_utils.calculate_emission_log_probs(
+            self.config, 
+            self.features,
+            self.propagation_params,
+            self.grid_angle_qg,
+            self.tof_params
+        )
+
+        emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)
+
+        self.spatiotemporal_probs_gt = soft_em_utils.run_forward_backward(
+            emission_log_probs_gt,
+            self.neighbor_matrix,
+            self.device
+        )
