@@ -43,4 +43,4 @@ output/*
 
 # Test
 analysis/
-benchmark
+*.sh
