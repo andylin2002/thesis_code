@@ -65,15 +65,16 @@ class SymbolicRuntime:
         trajectory = self.location_estimator.estimate(features, raw_csi_block)
 
         # DEBUG OUTPUT
+        epd_qgt = getattr(self.location_estimator, "epd_qgt", None)
         epd = getattr(self.location_estimator, "epd", None)
         stpd = getattr(self.location_estimator, "stpd", None)
         tpd = getattr(self.location_estimator, "tpd", None)
         reliability = getattr(self.location_estimator, "reliability", None)
-    
 
         # Package (future-proof: dict payload)
         pkg = {
             "trajectory": trajectory,
+            "epd_qgt": epd_qgt, 
             "epd": epd, 
             "stpd": stpd, 
             "tpd": tpd, 

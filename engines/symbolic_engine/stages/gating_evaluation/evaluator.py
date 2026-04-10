@@ -1,222 +1,149 @@
 # engines/symbolic_engine/stages/gating_evaluation/evaluator.py
 
 import torch
-import torch.nn as nn
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from core.models.csi_encoder import CSIEncoder
-from engines.neural_engine.stages.represent import CrossAPAttention
+from engines.neural_engine.stages.represent import RepresentStage
+from engines.neural_engine.stages.train import CrossAPReliabilityHead
 
 
-class GatingEvaluator(nn.Module):
+class GatingEvaluator:
     """
-    GatingEvaluator
-    ----------------
-    Inference-only module that converts a raw CSI block into AP-wise reliability.
+    Symbolic-side neural gating evaluator.
 
-    Design:
-        1. Use the same preprocessing as the neural RepresentStage
-           (amplitude normalization + inter-antenna phase difference).
-        2. Use the trained encoder + attention to infer AP probabilities p(q,t),
-           where sum over APs = 1 for each time step t.
-        3. Convert probabilities to reliability:
-               reliability(q,t) = Q * p(q,t)
-           so that:
-               - if all APs are equally probable => reliability(q,t) = 1
-               - more reliable APs => reliability(q,t) > 1
-               - less reliable APs => reliability(q,t) < 1
-        4. Output shape is aligned with symbolic engine:
-               single block  -> [Q, T]
-               batch blocks  -> [B, Q, T]
+    This evaluator reuses the neural-side RepresentStage and
+    CrossAPReliabilityHead directly, so future changes only need to be made in:
+        - engines/neural_engine/stages/represent.py
+        - engines/neural_engine/stages/train.py
 
-    Expected raw CSI input shape:
-        single block: [Q, T, N, M]
-        batch block : [B, Q, T, N, M]
+    Input:
+        raw_csi_block: [Q, T, N, M]
 
-    Notes:
-        - This evaluator does NOT train.
-        - This evaluator does NOT generate pseudo targets.
-        - This evaluator only performs inference and probability->reliability conversion.
-        - This evaluator must stay architecturally aligned with the neural training side.
+    Output:
+        reliability_qt: [Q, T]
+        logits_qt: [Q, T] (optional)
     """
 
-    def __init__(self, config: Dict[str, Any], device: torch.device):
-        super().__init__()
+    def __init__(self, config: Dict[str, Any], device: torch.device) -> None:
         self.config = config
         self.device = device
 
-        self.Q = len(config["ACCESS_POINTS"])
-        self.N = int(config["CSI_DIMENSIONS"]["NUM_RX_ANTENNAS"])
-        self.M = int(config["CSI_DIMENSIONS"]["NUM_SUBCARRIERS"])
-        self.D = int(config.get("LATENT_DIM", 128))
+        self.num_aps = len(config["ACCESS_POINTS"])
+        self.num_rx_antennas = int(config["CSI_DIMENSIONS"]["NUM_RX_ANTENNAS"])
+        self.num_subcarriers = int(config["CSI_DIMENSIONS"]["NUM_SUBCARRIERS"])
+        self.latent_dim = int(config.get("LATENT_DIM", 128))
 
-        # Keep the evaluator aligned with training-side attention temperature.
-        self.attention_temperature = float(config.get("ATTENTION_TEMPERATURE", 0.5))
+        # Reuse neural-side feature builder + encoder through RepresentStage
+        self.represent = RepresentStage(config, device)
 
-        # Optional clamp range for reliability.
-        # This is not the core mechanism; it is only a numerical safeguard.
-        self.reliability_min = float(config.get("RELIABILITY_MIN", 0.0))
-        self.reliability_max = float(config.get("RELIABILITY_MAX", float(self.Q)))
-
-        # Shared encoder (same architecture as neural training side)
-        self.encoder = CSIEncoder(
-            num_antennas=self.N,
-            num_subcarriers=self.M,
-            latent_dim=self.D
+        # Reuse the exact same reliability head definition as training side
+        self.reliability_head = CrossAPReliabilityHead(
+            feature_dim=self.latent_dim,
+            hidden_dim=int(config.get("RELIABILITY_HEAD_HIDDEN", 64)),
+            dropout=float(config.get("RELIABILITY_HEAD_DROPOUT", 0.1)),
         ).to(self.device)
 
-        # Same context-aware cross-AP scorer as training side
-        self.attention = CrossAPAttention(
-            feature_dim=self.D,
-            temperature=self.attention_temperature
-        ).to(self.device)
+        self.encoder = self.represent.encoder
+        self._set_eval_mode()
 
-        self.eval()
+    def _set_eval_mode(self) -> None:
+        self.encoder.eval()
+        self.reliability_head.eval()
 
-    # =========================================================
-    # Public API
-    # =========================================================
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        if not isinstance(state_dict, dict):
+            raise TypeError(f"state_dict must be a dict, got {type(state_dict)}")
+
+        encoder_state = state_dict.get("encoder")
+        reliability_head_state = state_dict.get("reliability_head")
+
+        if encoder_state is None:
+            raise KeyError("Missing key 'encoder' in gating state_dict")
+        if reliability_head_state is None:
+            raise KeyError("Missing key 'reliability_head' in gating state_dict")
+
+        self.encoder.load_state_dict(encoder_state, strict=True)
+        self.reliability_head.load_state_dict(reliability_head_state, strict=True)
+        self._set_eval_mode()
+
+        print("[GatingEvaluator] Neural weights hot-swapped successfully.")
+
     @torch.no_grad()
-    def evaluate(self, raw_csi: torch.Tensor, return_debug: bool = False):
+    def evaluate(
+        self,
+        raw_csi_block: torch.Tensor,
+        return_logits: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Convert raw CSI into AP-wise reliability.
-
         Args:
-            raw_csi:
-                [Q, T, N, M]       for a single CSI block
-                [B, Q, T, N, M]    for a batch of CSI blocks
-            return_debug:
-                False -> return reliability only
-                True  -> return (reliability, debug_dict)
+            raw_csi_block: [Q, T, N, M]
 
         Returns:
-            reliability:
-                [Q, T]       for single block
-                [B, Q, T]    for batch blocks
-
-            debug_dict (optional):
-                {
-                    "ap_probs": [Q, T] or [B, Q, T],
-                    "scores":   [Q, T] or [B, Q, T],
-                }
+            reliability_qt: [Q, T]
+            logits_qt: [Q, T] if return_logits=True
         """
-        self.eval()
-
-        if raw_csi.device != self.device:
-            raw_csi = raw_csi.to(self.device, non_blocking=True)
-
-        is_single = (raw_csi.dim() == 4)
-
-        if is_single:
-            raw_csi = raw_csi.unsqueeze(0)   # -> [1, Q, T, N, M]
-
-        if raw_csi.dim() != 5:
-            raise ValueError(
-                f"[GatingEvaluator] Expected raw_csi with shape [Q,T,N,M] or [B,Q,T,N,M], "
-                f"but got shape {tuple(raw_csi.shape)}"
-            )
-
-        B, Q, T, N, M = raw_csi.shape
-
-        if Q != self.Q:
-            raise ValueError(f"[GatingEvaluator] Q mismatch: expected {self.Q}, got {Q}")
-        if N != self.N:
-            raise ValueError(f"[GatingEvaluator] N mismatch: expected {self.N}, got {N}")
-        if M != self.M:
-            raise ValueError(f"[GatingEvaluator] M mismatch: expected {self.M}, got {M}")
-        if N < 2:
-            raise ValueError(
-                "[GatingEvaluator] NUM_RX_ANTENNAS must be at least 2 "
-                "to compute inter-antenna phase difference."
-            )
-
-        features = self._preprocess(raw_csi)  # [B, Q, T, N-1, M, 2]
-
-        features = features.reshape(B * Q, T, N - 1, M, 2).contiguous()
-        encoded = self.encoder(features, return_projection=False)  # [B*Q, T, D]
-        encoded = encoded.view(B, Q, T, -1).permute(0, 2, 1, 3).contiguous()  # [B, T, Q, D]
-
-        # now get both probs and raw logits
-        ap_probs, scores = self.attention(encoded, return_scores=True)  # [B, T, Q], [B, T, Q]
-
-        reliability = ap_probs * float(self.Q)  # [B, T, Q]
-        reliability = reliability.clamp(self.reliability_min, self.reliability_max)
-
-        # reorder to [B, Q, T]
-        reliability = reliability.permute(0, 2, 1).contiguous()
-        ap_probs_qt = ap_probs.permute(0, 2, 1).contiguous()
-        scores_qt = scores.permute(0, 2, 1).contiguous()
-
-        if is_single:
-            reliability = reliability[0]   # [Q, T]
-            ap_probs_qt = ap_probs_qt[0]   # [Q, T]
-            scores_qt = scores_qt[0]       # [Q, T]
-
-        if not return_debug:
-            return reliability
-
-        debug_dict = {
-            "ap_probs": ap_probs_qt,
-            "scores": scores_qt,
-        }
-        return reliability, debug_dict
-
-    def load_state_dict(self, state_dict: Optional[dict], strict: bool = False):
-        """
-        Load encoder/attention weights published from the neural engine.
-
-        Expected state_dict format from TrainStage.get_state_dict():
-        {
-            "encoder": {...},
-            "attention": {...},
-            "predictor": {...}   # ignored here
-        }
-        """
-        if state_dict is None:
-            return
-
-        encoder_sd = state_dict.get("encoder", None)
-        attention_sd = state_dict.get("attention", None)
-
-        if encoder_sd is not None:
-            self.encoder.load_state_dict(encoder_sd, strict=strict)
-
-        if attention_sd is not None:
-            self.attention.load_state_dict(attention_sd, strict=strict)
-
-        self.eval()
-
-    # =========================================================
-    # Internal helpers
-    # =========================================================
-    def _preprocess(self, raw_csi: torch.Tensor) -> torch.Tensor:
-        """
-        Preprocess raw CSI exactly the same way as neural RepresentStage.
-
-        Input:
-            raw_csi: [B, Q, T, N, M] (complex tensor)
-
-        Output:
-            features: [B, Q, T, N-1, M, 2]
-                channel 0: normalized amplitude
-                channel 1: inter-antenna phase difference
-        """
-        if not torch.is_complex(raw_csi):
+        if not isinstance(raw_csi_block, torch.Tensor):
             raise TypeError(
-                f"[GatingEvaluator] raw_csi must be a complex tensor, got dtype={raw_csi.dtype}"
+                f"AI Gating fail: raw_csi_block must be torch.Tensor, got {type(raw_csi_block)}"
             )
 
-        amplitude = torch.abs(raw_csi)   # [B,Q,T,N,M]
-        amplitude = amplitude / (amplitude.mean(dim=(-1, -2), keepdim=True) + 1e-8)
+        if raw_csi_block.device != self.device:
+            raw_csi_block = raw_csi_block.to(self.device, non_blocking=True)
 
-        phase = torch.angle(raw_csi)     # [B,Q,T,N,M]
+        if raw_csi_block.ndim != 4:
+            raise ValueError(
+                f"AI Gating fail: expected raw_csi_block shape [Q, T, N, M], got {tuple(raw_csi_block.shape)}"
+            )
 
-        # Inter-antenna phase difference with wrapping for stability
-        phase_delta = phase[:, :, :, 1:, :] - phase[:, :, :, :-1, :]
-        phase_diff = torch.atan2(torch.sin(phase_delta), torch.cos(phase_delta))
+        num_aps, num_steps, num_antennas, num_subcarriers = raw_csi_block.shape
 
-        # Match phase-diff antenna dimension: [N-1]
-        amplitude = amplitude[:, :, :, 1:, :]   # [B,Q,T,N-1,M]
+        if num_aps != self.num_aps:
+            raise ValueError(
+                f"AI Gating fail: configured num_aps={self.num_aps}, but got {num_aps}"
+            )
+        if num_antennas != self.num_rx_antennas:
+            raise ValueError(
+                f"AI Gating fail: configured num_rx_antennas={self.num_rx_antennas}, but got {num_antennas}"
+            )
+        if num_subcarriers != self.num_subcarriers:
+            raise ValueError(
+                f"AI Gating fail: configured num_subcarriers={self.num_subcarriers}, but got {num_subcarriers}"
+            )
 
-        features = torch.stack([amplitude, phase_diff], dim=-1)  # [B,Q,T,N-1,M,2]
-        return features
+        # [Q, T, N, M] -> [1, Q, T, N, M]
+        raw_csi_batch = raw_csi_block.unsqueeze(0)
+
+        # Reuse RepresentStage's exact feature-building logic
+        input_features = self.represent._build_input_features(raw_csi_batch)  # [1, Q, T, C, M]
+
+        # Reuse RepresentStage's exact encoder path
+        encoded = self.represent._encode_features(input_features)             # [1, T, Q, D]
+
+        if return_logits:
+            reliability_btq, logits_btq = self.reliability_head(
+                encoded,
+                return_logits=True,
+            )
+        else:
+            reliability_btq = self.reliability_head(
+                encoded,
+                return_logits=False,
+            )
+            logits_btq = None
+
+        if reliability_btq.ndim != 3:
+            raise RuntimeError(
+                f"AI Gating fail: reliability head must output [B, T, Q], got {tuple(reliability_btq.shape)}"
+            )
+
+        reliability_qt = reliability_btq[0].transpose(0, 1).contiguous()  # [Q, T]
+
+        if return_logits:
+            if logits_btq is None:
+                raise RuntimeError(
+                    "AI Gating fail: return_logits=True but logits were not produced"
+                )
+            logits_qt = logits_btq[0].transpose(0, 1).contiguous()         # [Q, T]
+            return reliability_qt, logits_qt
+
+        return reliability_qt

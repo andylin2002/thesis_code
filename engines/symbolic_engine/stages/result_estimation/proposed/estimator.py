@@ -46,6 +46,7 @@ class ProposedEstimator:
 
         # State tracking
         self.trajectory = None
+        self.epd_qgt = None
         self.epd = None
         self.stpd = None
         self.tpd = None
@@ -71,6 +72,7 @@ class ProposedEstimator:
             self.softem.build_initial_state_only()
         
         # --- Step 2: Retrieve the Calculated EPD & STPD ---
+        self.epd_qgt = self.softem.get_epd_qgt(apply_reliability=False) #DEBUG
         self.epd = self.softem.get_final_epd()
         self.stpd = self.softem.get_final_stpd()
         self.tpd = None

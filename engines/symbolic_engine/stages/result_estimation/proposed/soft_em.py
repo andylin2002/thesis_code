@@ -221,3 +221,31 @@ class SoftEMAlgorithm:
             self.neighbor_matrix,
             self.device
         )
+
+    # DEBUG
+    def get_epd_qgt(self, apply_reliability: bool = False) -> torch.Tensor:
+        """
+        Returns per-AP emission log probabilities with shape (Q, G, T).
+
+        Args:
+            apply_reliability:
+                False -> return raw per-AP emission from symbolic model
+                True  -> return reliability-weighted per-AP emission
+
+        Returns:
+            Tensor of shape (Q, G, T)
+        """
+        if self.emission_log_probs_qgt is None:
+            raise RuntimeError("Run step_parameters() first!")
+
+        epd_qgt = self.emission_log_probs_qgt.clone()
+
+        if apply_reliability:
+            if self.reliability is None:
+                raise RuntimeError(
+                    "apply_reliability=True but reliability is None. "
+                    "Call set_reliability() first or use apply_reliability=False."
+                )
+            epd_qgt = epd_qgt * self.reliability.unsqueeze(1)  # (Q,1,T) broadcast to (Q,G,T)
+
+        return epd_qgt

@@ -68,6 +68,11 @@ def main():
         y_bounds=y_bounds
     )
 
+    #DEBUG
+    grid_np = reference_grid.detach().cpu().numpy()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    np.save(os.path.join(OUTPUT_DIR, "grid.npy"), grid_np)
+
     config['X_BOUNDS'] = x_bounds
     config['Y_BOUNDS'] = y_bounds
     config['X_WIDTH'] = x_width
@@ -169,10 +174,10 @@ def main():
                 print(f"[System] Waiting for {total_batches_in_round} results...")
                 
                 # Containers for THIS round
-                round_trajectories = [] 
+                round_trajectories = []
+                round_epds_qgt = [] 
                 round_epds = []
                 round_stpds = []
-                round_tpds = []
                 round_rels = []
 
                 received_count = 0
@@ -184,16 +189,14 @@ def main():
                         # Data Collection
                         traj = utils.to_numpy(payload.get("trajectory"))
                         if traj is not None: round_trajectories.append(traj)
-                        '''
+                        epd_qgt = utils.to_numpy(payload.get("epd_qgt"))
+                        if epd_qgt is not None: round_epds_qgt.append(epd_qgt)
                         epd = utils.to_numpy(payload.get("epd"))
                         if epd is not None: round_epds.append(epd)
                         stpd = utils.to_numpy(payload.get("stpd"))
                         if stpd is not None: round_stpds.append(stpd)
-                        tpd = utils.to_numpy(payload.get("tpd"))
-                        if tpd is not None: round_tpds.append(tpd)
                         rel = utils.to_numpy(payload.get("reliability"))
                         if rel is not None: round_rels.append(rel)
-                        '''
 
                     except Exception as e:
                         print(f"\n[System] Collection Error: {e}")
@@ -205,16 +208,14 @@ def main():
                 # Saving
                 if round_trajectories:
                     np.save("output/predicted_trajectory.npy", np.concatenate(round_trajectories, axis=0))
-                '''
+                if round_epds_qgt:
+                    np.save("output/epd_qgt.npy", np.concatenate(round_epds_qgt, axis=2))
                 if round_epds:
                     np.save("output/epd.npy", np.concatenate(round_epds, axis=1))
                 if round_stpds:
                     np.save("output/stpd.npy", np.concatenate(round_stpds, axis=1))
-                if round_tpds:
-                    np.save("output/tpd.npy", np.concatenate(round_tpds, axis=0))
                 if round_rels:
                     np.save("output/reliability.npy", np.stack(round_rels, axis=0))
-                '''
                 
             else:
                 print("[System] Neural-only mode: Skipping results collection.")

@@ -1,191 +1,184 @@
 # engines/neural_engine/stages/represent.py
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 from core.models.csi_encoder import CSIEncoder
 
 
-class CrossAPAttention(nn.Module):
-    """
-    Context-aware AP reliability scorer.
-
-    Input:
-        z_q: [B, T, Q, D]
-
-    Output:
-        probs : [B, T, Q]
-        scores: [B, T, Q]  (optional, before softmax)
-
-    Design:
-        For each AP at each time step, score it using:
-            - its own latent feature z_q
-            - cross-AP context mean(z_q over Q)
-            - relative deviation from context: z_q - context
-
-        This is still lightweight, but it is now genuinely relative across APs.
-    """
-
-    def __init__(self, feature_dim: int, temperature: float = 0.5):
-        super().__init__()
-        self.temperature = float(temperature)
-
-        in_dim = feature_dim * 3
-        hidden_dim = max(feature_dim, 32)
-
-        self.attention_head = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def forward(
-        self,
-        z_q: torch.Tensor,
-        return_scores: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Args:
-            z_q: [B, T, Q, D]
-            return_scores: whether to also return raw scores before softmax
-
-        Returns:
-            probs:  [B, T, Q]
-            scores: [B, T, Q] (if return_scores=True)
-        """
-        if z_q.ndim != 4:
-            raise ValueError(f"Expected z_q with shape [B, T, Q, D], got {tuple(z_q.shape)}")
-
-        # Cross-AP context at each time step
-        context = z_q.mean(dim=2, keepdim=True)      # [B, T, 1, D]
-        context = context.expand_as(z_q)             # [B, T, Q, D]
-
-        # Relative deviation from cross-AP context
-        delta = z_q - context                        # [B, T, Q, D]
-
-        # Concatenate self / context / relative info
-        head_input = torch.cat([z_q, context, delta], dim=-1)  # [B, T, Q, 3D]
-
-        # Raw scores before softmax
-        scores = self.attention_head(head_input).squeeze(-1)   # [B, T, Q]
-
-        # Relative AP probability
-        probs = F.softmax(scores / self.temperature, dim=-1)   # [B, T, Q]
-
-        if return_scores:
-            return probs, scores
-        return probs
-
-
 class RepresentStage:
     """
-    Preprocesses CSI and extracts spatial-temporal latents and AP probabilities.
-
-    Pipeline:
-        raw CSI [B,Q,T,N,M]
-            -> amplitude normalization + inter-antenna phase difference
-            -> reshape to [B*Q,T,N-1,M,2]
-            -> shared CNN+GRU encoder
-            -> encoded latent [B,T,Q,D]
-            -> cross-AP attention probabilities [B,T,Q]
+    RepresentStage:
+        raw CSI [B, Q, T, N, M] (complex)
+            -> build neural features [B, Q, T, C, M]
+            -> encode with CSIEncoder
+            -> output encoded [B, T, Q, D]
     """
 
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.device = device
-        self.Q = len(config["ACCESS_POINTS"])
-        self.N = int(config["CSI_DIMENSIONS"]["NUM_RX_ANTENNAS"])
-        self.M = int(config["CSI_DIMENSIONS"]["NUM_SUBCARRIERS"])
-        self.D = int(config.get("LATENT_DIM", 128))
+        self.num_aps = len(config["ACCESS_POINTS"])
+        self.num_rx_antennas = int(config["CSI_DIMENSIONS"]["NUM_RX_ANTENNAS"])
+        self.num_subcarriers = int(config["CSI_DIMENSIONS"]["NUM_SUBCARRIERS"])
+        self.latent_dim = int(config.get("LATENT_DIM", 128))
 
-        # Optional config for attention temperature
-        self.attention_temperature = float(config.get("ATTENTION_TEMPERATURE", 0.5))
+        if self.num_rx_antennas < 2:
+            raise ValueError("NUM_RX_ANTENNAS must be at least 2")
 
-        # Shared CNN+GRU encoder
+        self.antenna_pairs = self._build_antenna_pairs(self.num_rx_antennas)
+        self.num_phase_diff_channels = len(self.antenna_pairs)
+        self.num_feature_channels = 1 + self.num_phase_diff_channels
+
+        self.center_phase_over_subcarriers = bool(
+            config.get("NEURAL_CENTER_PHASE_OVER_SUBCARRIERS", True)
+        )
+
         self.encoder = CSIEncoder(
-            num_antennas=self.N,
-            num_subcarriers=self.M,
-            latent_dim=self.D
+            num_feature_channels=self.num_feature_channels,
+            num_subcarriers=self.num_subcarriers,
+            cnn_channels=config.get("NEURAL_CNN_CHANNELS", [16, 32]),
+            cnn_kernel_size=int(config.get("NEURAL_CNN_KERNEL_SIZE", 3)),
+            tcn_hidden=int(config.get("NEURAL_TCN_HIDDEN", 64)),
+            tcn_kernel_size=int(config.get("NEURAL_TCN_KERNEL_SIZE", 3)),
+            tcn_dilations=config.get("NEURAL_TCN_DILATIONS", [1, 2, 4]),
+            mlp_hidden=int(config.get("NEURAL_MLP_HIDDEN", 64)),
+            latent_dim=self.latent_dim,
+            proj_dim=int(config.get("PROJ_DIM", 64)),
+            dropout=float(config.get("NEURAL_DROPOUT", 0.1)),
         ).to(self.device)
 
-        # Context-aware cross-AP scorer
-        self.attention = CrossAPAttention(
-            feature_dim=self.D,
-            temperature=self.attention_temperature
-        ).to(self.device)
-
-    def process(
-        self,
-        raw_csi: torch.Tensor,
-        return_scores: bool = False
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor],
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ]:
+    def process(self, raw_csi: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            raw_csi: [B, Q, T, N, M]
-            return_scores: whether to also return raw attention logits
+        Input:
+            raw_csi: [B, Q, T, N, M] (complex tensor)
 
-        Returns:
-            encoded : [B, T, Q, D]
-            ap_probs: [B, T, Q]
-            scores  : [B, T, Q] (optional)
+        Output:
+            encoded: [B, T, Q, D]
         """
         if raw_csi.device != self.device:
             raw_csi = raw_csi.to(self.device, non_blocking=True)
 
         if raw_csi.ndim != 5:
-            raise ValueError(f"Expected raw_csi with shape [B,Q,T,N,M], got {tuple(raw_csi.shape)}")
+            raise ValueError(
+                f"Expected raw_csi with shape [B, Q, T, N, M], got {tuple(raw_csi.shape)}"
+            )
 
-        B, Q, T, N, M = raw_csi.shape
+        batch_size, num_aps, num_steps, num_antennas, num_subcarriers = raw_csi.shape
 
-        if Q != self.Q:
-            raise ValueError(f"Configured Q={self.Q}, but input Q={Q}")
-        if N != self.N:
-            raise ValueError(f"Configured N={self.N}, but input N={N}")
-        if M != self.M:
-            raise ValueError(f"Configured M={self.M}, but input M={M}")
+        if num_aps != self.num_aps:
+            raise ValueError(f"Configured num_aps={self.num_aps}, but got {num_aps}")
+        if num_antennas != self.num_rx_antennas:
+            raise ValueError(
+                f"Configured num_rx_antennas={self.num_rx_antennas}, but got {num_antennas}"
+            )
+        if num_subcarriers != self.num_subcarriers:
+            raise ValueError(
+                f"Configured num_subcarriers={self.num_subcarriers}, but got {num_subcarriers}"
+            )
 
-        if N < 2:
-            raise ValueError("NUM_RX_ANTENNAS must be at least 2 to compute inter-antenna phase difference.")
+        input_features = self._build_input_features(raw_csi)   # [B, Q, T, C, M]
+        encoded = self._encode_features(input_features)        # [B, T, Q, D]
+        return encoded
 
-        # ------------------------------------------------------------
-        # 1. Preprocessing
-        # ------------------------------------------------------------
-        # Amplitude normalization
-        amplitude = torch.abs(raw_csi)  # [B,Q,T,N,M]
-        amplitude = amplitude / (amplitude.mean(dim=(-1, -2), keepdim=True) + 1e-8)
+    def _build_antenna_pairs(self, num_antennas: int) -> List[Tuple[int, int]]:
+        pairs = []
+        for i in range(num_antennas):
+            for j in range(i + 1, num_antennas):
+                pairs.append((i, j))
+        return pairs
 
-        # Keep antenna dimension aligned with phase difference (N-1)
-        amplitude = amplitude[:, :, :, 1:, :]  # [B,Q,T,N-1,M]
+    def _build_input_features(self, raw_csi: torch.Tensor) -> torch.Tensor:
+        """
+        Build neural input features from raw CSI.
 
-        # Inter-antenna phase difference
-        phase = torch.angle(raw_csi)  # [B,Q,T,N,M]
-        phase_delta = phase[:, :, :, 1:, :] - phase[:, :, :, :-1, :]  # [B,Q,T,N-1,M]
-        phase_diff = torch.atan2(torch.sin(phase_delta), torch.cos(phase_delta))  # wrapped diff
+        Input:
+            raw_csi: [B, Q, T, N, M] (complex)
 
-        # Stack amplitude and phase_diff as 2-channel input
-        features = torch.stack([amplitude, phase_diff], dim=-1)  # [B,Q,T,N-1,M,2]
+        Output:
+            input_features: [B, Q, T, C, M]
+                channel 0: normalized amplitude
+                channel 1..: wrapped phase-difference channels in [-1, 1]
+        """
+        eps = 1e-8
 
-        # ------------------------------------------------------------
-        # 2. Shared AP encoding
-        # ------------------------------------------------------------
-        # Flatten AP into batch, preserve temporal dimension T
-        features = features.reshape(B * Q, T, N - 1, M, 2)  # [B*Q,T,N-1,M,2]
+        # ----- amplitude -----
+        amplitude = torch.abs(raw_csi)  # [B, Q, T, N, M]
 
-        encoded = self.encoder(features, return_projection=False)  # [B*Q,T,D]
+        amp_mean = amplitude.mean(dim=(-1, -2), keepdim=True).clamp_min(eps)
+        amplitude_norm = amplitude / amp_mean
 
-        # Restore explicit [B,T,Q,D]
-        encoded = encoded.view(B, Q, T, -1).permute(0, 2, 1, 3).contiguous()  # [B,T,Q,D]
+        amplitude_channel = amplitude_norm.mean(dim=3)            # [B, Q, T, M]
+        amplitude_channel = amplitude_channel.unsqueeze(3)        # [B, Q, T, 1, M]
 
-        # ------------------------------------------------------------
-        # 3. Cross-AP reliability probability
-        # ------------------------------------------------------------
-        if return_scores:
-            ap_probs, scores = self.attention(encoded, return_scores=True)  # [B,T,Q], [B,T,Q]
-            return encoded, ap_probs, scores
+        amp_sub_mean = amplitude_channel.mean(dim=-1, keepdim=True)
+        amp_sub_std = amplitude_channel.std(dim=-1, keepdim=True).clamp_min(eps)
+        amplitude_channel = (amplitude_channel - amp_sub_mean) / amp_sub_std
 
-        ap_probs = self.attention(encoded, return_scores=False)  # [B,T,Q]
-        return encoded, ap_probs
+        # ----- phase difference -----
+        phase = torch.angle(raw_csi)  # [B, Q, T, N, M]
+        phase_diff_channels = []
+
+        for i, j in self.antenna_pairs:
+            phase_diff = phase[:, :, :, j, :] - phase[:, :, :, i, :]  # [B, Q, T, M]
+
+            wrapped = torch.atan2(
+                torch.sin(phase_diff),
+                torch.cos(phase_diff),
+            )  # [-pi, pi]
+
+            # Keep true spread information for proxy statistics
+            wrapped = wrapped / torch.pi  # [-1, 1]
+
+            if self.center_phase_over_subcarriers:
+                wrapped = wrapped - wrapped.mean(dim=-1, keepdim=True)
+
+            phase_diff_channels.append(wrapped.unsqueeze(3))  # [B, Q, T, 1, M]
+
+        phase_diff_tensor = torch.cat(phase_diff_channels, dim=3)  # [B, Q, T, Cp, M]
+
+        input_features = torch.cat(
+            [amplitude_channel, phase_diff_tensor],
+            dim=3,
+        )  # [B, Q, T, C, M]
+
+        return input_features
+
+    def _encode_features(self, input_features: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            input_features: [B, Q, T, C, M]
+
+        Output:
+            encoded: [B, T, Q, D]
+        """
+        batch_size, num_aps, num_steps, num_channels, num_subcarriers = input_features.shape
+
+        if num_channels != self.num_feature_channels:
+            raise ValueError(
+                f"Expected num_feature_channels={self.num_feature_channels}, got {num_channels}"
+            )
+        if num_subcarriers != self.num_subcarriers:
+            raise ValueError(
+                f"Expected num_subcarriers={self.num_subcarriers}, got {num_subcarriers}"
+            )
+
+        encoder_input = input_features.view(
+            batch_size * num_aps,
+            num_steps,
+            num_channels,
+            num_subcarriers,
+        )  # [B*Q, T, C, M]
+
+        encoded_per_ap = self.encoder(
+            encoder_input,
+            return_projection=False,
+        )  # [B*Q, T, D]
+
+        encoded = encoded_per_ap.view(
+            batch_size,
+            num_aps,
+            num_steps,
+            -1,
+        ).permute(0, 2, 1, 3).contiguous()  # [B, T, Q, D]
+
+        return encoded

@@ -67,7 +67,7 @@ class ProposedProcessor:
         # [Q, T, C, 5]
         features = features_stacked_flat.reshape(self.num_ap, self.num_sample, C, 5)
 
-        DEBUG = False
+        DEBUG = True
         if DEBUG:
             self._save_debug_info(features)
 

@@ -1,6 +1,8 @@
 # engines/symbolic_engine/strategies/estimation_strategy.py
 
 import torch
+import os
+import numpy as np
 from typing import Optional, Tuple, Union
 from core.interfaces import IEstimator
 from ..stages.result_estimation._common import grid_tools
@@ -81,6 +83,13 @@ class ProposedEstimatorStrategy(IEstimator):
 
         G_index = torch.arange(reference_grid.shape[0], device=device)
         neighbor_matrix = grid_tools.get_all_neighbor_indices(config, G_index, device)
+        #DEBUG
+        # Save neighbor_matrix once
+        os.makedirs("output", exist_ok=True)
+        neighbor_path = os.path.join("output", "neighbor_matrix.npy")
+        if not os.path.exists(neighbor_path):
+            np.save(neighbor_path, neighbor_matrix.detach().cpu().numpy())
+            print(f"[ProposedStrategy] neighbor_matrix saved to {neighbor_path}")
 
         grid_neighbor_delay_diff_qgk = soft_em_utils.calculate_grid_neighbor_delay_diff_qgk(
             grid_delay_qg=grid_delay_qg,
@@ -106,14 +115,6 @@ class ProposedEstimatorStrategy(IEstimator):
     # =========================================================
     # Public API for Symbolic Worker
     # =========================================================
-    '''
-    def set_gating_state_dict(self, state_dict: Optional[dict]) -> None:
-        """
-        Updates the AI model weights on-the-fly (e.g., from neural_worker).
-        """
-        if state_dict is not None:
-            self.gating_evaluator.load_state_dict(state_dict)
-    '''
     def set_gating_state_dict(self, state_dict: Optional[dict], step: Optional[int] = None) -> None:
         if state_dict is None:
             print("[ProposedStrategy] Received empty gating state_dict.")
@@ -140,7 +141,7 @@ class ProposedEstimatorStrategy(IEstimator):
 
         if raw_csi_block is not None:
             try:
-                reliability = self.gating_evaluator.evaluate(raw_csi_block, False)
+                reliability = self.gating_evaluator.evaluate(raw_csi_block)
 
             except Exception as e:
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
@@ -158,6 +159,7 @@ class ProposedEstimatorStrategy(IEstimator):
         trajectory = estimator.solve()
 
         # DEBUG OUTPUT
+        self.epd_qgt = getattr(estimator, 'epd_qgt', None)
         self.epd = getattr(estimator, 'epd', None)
         self.stpd = getattr(estimator, 'stpd', None)
         self.reliability = reliability
