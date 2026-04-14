@@ -99,7 +99,11 @@ class MMPAlgorithm:
         numerator = torch.sum(upper_conj * projected_lower, dim=1)
         denominator = torch.sum(upper_conj * projected_upper, dim=1)
 
+        eps = torch.tensor(1e-8, device=denominator.device, dtype=denominator.real.dtype)
+        denominator = denominator + eps.to(denominator.dtype)
+
         eigv_x = numerator / denominator
+        eigv_x = torch.nan_to_num(eigv_x, nan=0.0, posinf=0.0, neginf=0.0)
 
         # --- eigv_x -> AoA ---
         aoa_tensor = self._eigv_x_to_aoa(eigv_x)
@@ -222,6 +226,19 @@ class MMPAlgorithm:
 
         # Least Squares
         y_vec = input_csi.reshape(batch_size, N * M, 1)
-        complex_gains = torch.linalg.pinv(S_matrix) @ y_vec 
-        
-        return complex_gains.squeeze(2).abs() # Return Magnitude
+
+        # sanitize matrices before pseudo-inverse
+        S_matrix = torch.nan_to_num(S_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+        y_vec = torch.nan_to_num(y_vec, nan=0.0, posinf=0.0, neginf=0.0)
+
+        try:
+            complex_gains = torch.linalg.pinv(S_matrix) @ y_vec
+        except RuntimeError:
+            S_matrix_cpu = S_matrix.detach().to("cpu", dtype=torch.complex128)
+            y_vec_cpu = y_vec.detach().to("cpu", dtype=torch.complex128)
+            complex_gains_cpu = torch.linalg.pinv(S_matrix_cpu) @ y_vec_cpu
+            complex_gains = complex_gains_cpu.to(device=input_csi.device, dtype=input_csi.dtype)
+
+        complex_gains = torch.nan_to_num(complex_gains, nan=0.0, posinf=0.0, neginf=0.0)
+
+        return complex_gains.squeeze(2).abs()

@@ -46,10 +46,10 @@ class ProposedEstimator:
 
         # State tracking
         self.trajectory = None
-        self.epd_qgt = None
-        self.epd = None
-        self.stpd = None
-        self.tpd = None
+        self.emission_log_probs_qgt = None
+        self.emission_log_probs_gt = None
+        self.posterior_gt = None
+        self.transition_log_probs = None
 
     def solve(self) -> torch.Tensor:
         """
@@ -72,18 +72,17 @@ class ProposedEstimator:
             self.softem.build_initial_state_only()
         
         # --- Step 2: Retrieve the Calculated EPD & STPD ---
-        self.epd_qgt = self.softem.get_epd_qgt(apply_reliability=False) #DEBUG
-        self.epd = self.softem.get_final_epd()
-        self.stpd = self.softem.get_final_stpd()
-        self.tpd = None
+        self.emission_log_probs_qgt = self.softem.get_emission_log_probs_qgt()
+        self.emission_log_probs_gt = self.softem.get_emission_log_probs_gt()
+        self.posterior_gt = self.softem.get_posterior_gt()
 
         # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
         # Run Viterbi once with the AI Transition Handler
         trajectory, _ = self.viterbi.run(
-            emission_log_probs=self.epd,
+            emission_log_probs=self.emission_log_probs_gt,
             neighbor_index_matrix=self.neighbor_matrix,
             get_max_previous_score=soft_em_utils.get_max_previous_score,
-            transition_log_probs=self.tpd
+            transition_log_probs=self.transition_log_probs
         )
 
         self.trajectory = trajectory

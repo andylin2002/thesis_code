@@ -276,29 +276,3 @@ def get_history_coords_batch(
     history_coords[valid_mask] = coords_flat
     
     return history_coords
-
-import time
-
-class Timer:
-    """
-    Usage:
-        with utils.Timer("Symbolic Step"):
-            # target
-            result = model(data)
-    
-    Output:
-        [Symbolic Step] *.* ms
-    """
-    def __init__(self, name="Timer", flush=True):
-        self.name = name
-        self.flush = flush
-
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        dt_ms = (time.perf_counter() - self.start) * 1000
-        print(f"[{self.name}] {dt_ms:.2f} ms", flush=self.flush)
-
-

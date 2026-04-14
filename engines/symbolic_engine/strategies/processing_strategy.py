@@ -37,6 +37,9 @@ class ProposedProcessorStrategy(IProcessor):
 
         self.processor = ProposedProcessor(config)
 
+        # Neural's input
+        self.aggregated_csi = None
+
     def extract(self, raw_csi_block):
         """
         Input: [Q, T, N, M]
@@ -46,5 +49,8 @@ class ProposedProcessorStrategy(IProcessor):
         features = self.processor.process(
             raw_csi_data=raw_csi_block
         )
+
+        # Neural's input
+        self.aggregated_csi = getattr(self.processor, 'aggregated_csi', None)
         
         return features

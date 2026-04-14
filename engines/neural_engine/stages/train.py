@@ -1,432 +1,341 @@
 # engines/neural_engine/stages/train.py
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
-
-class CrossAPReliabilityHead(nn.Module):
-    """
-    Map encoded AP features [B, T, Q, D] to:
-        logits: [B, T, Q]
-        reliability: [B, T, Q], with sum_q reliability = Q
-    """
-
-    def __init__(
-        self,
-        feature_dim: int,
-        hidden_dim: int = 64,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-
-        self.norm = nn.LayerNorm(feature_dim)
-        self.score_mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(
-        self,
-        encoded: torch.Tensor,
-        return_logits: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        if encoded.ndim != 4:
-            raise ValueError(
-                f"Expected encoded with shape [B, T, Q, D], got {tuple(encoded.shape)}"
-            )
-
-        _, _, num_aps, _ = encoded.shape
-
-        x = self.norm(encoded)                    # [B, T, Q, D]
-        logits = self.score_mlp(x).squeeze(-1)   # [B, T, Q]
-        reliability = num_aps * F.softmax(logits, dim=-1)
-
-        if return_logits:
-            return reliability, logits
-        return reliability
+from core.models.reliability_model import NeuralReliabilityModel
 
 
 class TrainStage:
-    """
-    First-version training stage for AP reliability learning.
-
-    Loss:
-        total = lambda_consistency * L_consistency
-              + lambda_ranking * L_ranking
-    """
+    """Train neural reliability model with eval-aware diagnostics."""
 
     def __init__(
         self,
         config: Dict[str, Any],
         device: torch.device,
-        encoder: nn.Module,
     ):
         self.device = device
-        self.encoder = encoder
 
-        self.latent_dim = int(config.get("LATENT_DIM", 128))
-        self.learning_rate = float(config.get("LR", 5e-4))
+        self.learning_rate = float(config.get("LR", 1e-3))
         self.grad_clip_norm = float(config.get("GRAD_CLIP_NORM", 1.0))
 
-        # Stronger ranking by default
-        self.lambda_consistency = float(config.get("LOSS_WEIGHT_CONS", 1.0))
-        self.lambda_ranking = float(config.get("LOSS_WEIGHT_RANK", 1.0))
+        self.loss_weight_proxy = float(config.get("LOSS_WEIGHT_PROXY", 1.0))
+        self.loss_weight_smooth = float(config.get("LOSS_WEIGHT_SMOOTH", 0.0))
 
-        # Mild augmentations
-        self.subcarrier_keep_ratio = float(config.get("SUBCARRIER_KEEP_RATIO", 0.85))
-        self.feature_dropout_prob = float(config.get("FEATURE_DROPOUT_PROB", 0.05))
-        self.amplitude_jitter_std = float(config.get("AMPLITUDE_JITTER_STD", 0.02))
-        self.phase_jitter_std = float(config.get("PHASE_JITTER_STD", 0.01))
+        self.force_eval_mode_during_fit = bool(
+            config.get("NEURAL_FORCE_EVAL_MODE_DURING_FIT", False)
+        )
+        self.freeze_bn_dropout = bool(
+            config.get("NEURAL_FREEZE_BN_DROPOUT", False)
+        )
 
-        self.rank_margin = float(config.get("RANK_MARGIN", 0.05))
-        self.rank_gap_threshold = float(config.get("RANK_GAP_THRESHOLD", 0.05))
-
-        # Proxy weights
-        self.proxy_alpha = float(config.get("PROXY_ALPHA", 1.0))   # phase variance
-        self.proxy_beta = float(config.get("PROXY_BETA", 0.5))     # |skewness|
-        self.proxy_gamma = float(config.get("PROXY_GAMMA", 0.0))   # |excess kurtosis|
-
-        self.eps = 1e-8
-
-        self.reliability_head = CrossAPReliabilityHead(
-            feature_dim=self.latent_dim,
-            hidden_dim=int(config.get("RELIABILITY_HEAD_HIDDEN", 64)),
-            dropout=float(config.get("RELIABILITY_HEAD_DROPOUT", 0.1)),
-        ).to(self.device)
-
+        self.model = NeuralReliabilityModel(config).to(self.device)
         self.optimizer = optim.Adam(
-            [
-                {"params": self.encoder.parameters()},
-                {"params": self.reliability_head.parameters()},
-            ],
+            self.model.parameters(),
             lr=self.learning_rate,
         )
 
+        if self.freeze_bn_dropout:
+            self._freeze_bn_and_disable_dropout()
+
         self.last_debug_tensors: Dict[str, torch.Tensor] = {}
 
-    # --------------------------------------------------
-    # Feature-level augmentation
-    # --------------------------------------------------
-    def _random_subcarrier_mask(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [B, Q, T, C, M]
-        Keep a random subset of subcarriers.
-        """
-        if self.subcarrier_keep_ratio >= 1.0:
-            return x
+    def _freeze_bn_and_disable_dropout(self) -> None:
+        for module in self.model.modules():
+            if isinstance(
+                module,
+                (
+                    torch.nn.Dropout,
+                    torch.nn.Dropout1d,
+                    torch.nn.Dropout2d,
+                    torch.nn.Dropout3d,
+                ),
+            ):
+                module.p = 0.0
+                module.eval()
 
-        bsz, num_aps, num_steps, _, num_subcarriers = x.shape
-        keep = max(1, int(round(num_subcarriers * self.subcarrier_keep_ratio)))
+            if isinstance(
+                module,
+                (
+                    torch.nn.BatchNorm1d,
+                    torch.nn.BatchNorm2d,
+                    torch.nn.BatchNorm3d,
+                ),
+            ):
+                module.eval()
+                for param in module.parameters():
+                    param.requires_grad = False
 
-        mask = torch.zeros(
-            (bsz, num_aps, num_steps, 1, num_subcarriers),
-            device=x.device,
-            dtype=x.dtype,
-        )
-
-        for b in range(bsz):
-            for q in range(num_aps):
-                for t in range(num_steps):
-                    idx = torch.randperm(num_subcarriers, device=x.device)[:keep]
-                    mask[b, q, t, 0, idx] = 1.0
-
-        return x * mask
-
-    def _feature_dropout(self, x: torch.Tensor) -> torch.Tensor:
-        if self.feature_dropout_prob <= 0.0:
-            return x
-        return F.dropout(x, p=self.feature_dropout_prob, training=True)
-
-    def _add_small_jitter(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.clone()
-
-        # amplitude
-        x[:, :, :, 0:1, :] = (
-            x[:, :, :, 0:1, :]
-            + torch.randn_like(x[:, :, :, 0:1, :]) * self.amplitude_jitter_std
-        )
-
-        # phase difference
-        if x.shape[3] > 1:
-            x[:, :, :, 1:, :] = (
-                x[:, :, :, 1:, :]
-                + torch.randn_like(x[:, :, :, 1:, :]) * self.phase_jitter_std
-            )
-
-        return x
-
-    def _build_two_views(self, input_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        view_a = self._random_subcarrier_mask(input_features)
-        view_b = self._random_subcarrier_mask(input_features)
-
-        view_a = self._feature_dropout(view_a)
-        view_b = self._feature_dropout(view_b)
-
-        view_a = self._add_small_jitter(view_a)
-        view_b = self._add_small_jitter(view_b)
-
-        return view_a, view_b
-
-    # --------------------------------------------------
-    # Encode
-    # --------------------------------------------------
-    def _encode_from_features(self, input_features: torch.Tensor) -> torch.Tensor:
-        """
-        Input:
-            input_features: [B, Q, T, C, M]
-
-        Output:
-            encoded: [B, T, Q, D]
-        """
-        if input_features.ndim != 5:
-            raise ValueError(
-                f"Expected input_features with shape [B, Q, T, C, M], got {tuple(input_features.shape)}"
-            )
-
-        batch_size, num_aps, num_steps, num_channels, num_subcarriers = input_features.shape
-
-        encoder_input = input_features.view(
-            batch_size * num_aps,
-            num_steps,
-            num_channels,
-            num_subcarriers,
-        )  # [B*Q, T, C, M]
-
-        encoded_per_ap = self.encoder(
-            encoder_input,
-            return_projection=False,
-        )  # [B*Q, T, D]
-
-        encoded = encoded_per_ap.view(
-            batch_size,
-            num_aps,
-            num_steps,
-            -1,
-        ).permute(0, 2, 1, 3).contiguous()  # [B, T, Q, D]
-
-        return encoded
-
-    # --------------------------------------------------
-    # Loss 1: subset consistency
-    # --------------------------------------------------
-    def _compute_consistency_loss(
+    def _compute_score_loss(
         self,
-        logits_a: torch.Tensor,
-        logits_b: torch.Tensor,
+        pred_logits: torch.Tensor,
+        target_score: torch.Tensor,
     ) -> torch.Tensor:
-        return F.mse_loss(logits_a, logits_b)
+        target_btq = target_score.permute(0, 2, 1).contiguous()
+        target_btq = target_btq - target_btq.mean(dim=-1, keepdim=True)
+        return F.mse_loss(pred_logits, target_btq)
 
-    # --------------------------------------------------
-    # Weak proxy statistics
-    # --------------------------------------------------
-    def _normalize_across_aps(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [B, T, Q]
-        """
-        mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True).clamp_min(self.eps)
-        return (x - mean) / std
-
-    def _compute_phase_variance(self, input_features: torch.Tensor) -> torch.Tensor:
-        """
-        input_features: [B, Q, T, C, M]
-        phase channels = 1..C-1
-
-        Return:
-            phase_var: [B, T, Q]
-        """
-        if input_features.shape[3] <= 1:
+    def _compute_smoothness_loss(
+        self,
+        pred_reliability: torch.Tensor,
+    ) -> torch.Tensor:
+        if pred_reliability.shape[1] < 2:
             return torch.zeros(
-                input_features.shape[0],
-                input_features.shape[2],
-                input_features.shape[1],
-                device=input_features.device,
-                dtype=input_features.dtype,
+                (),
+                device=pred_reliability.device,
+                dtype=pred_reliability.dtype,
             )
 
-        phase_channels = input_features[:, :, :, 1:, :]                # [B, Q, T, Cp, M]
-        phase_var = phase_channels.var(dim=(-1, -2), unbiased=False)   # [B, Q, T]
-        return phase_var.permute(0, 2, 1).contiguous()                 # [B, T, Q]
+        diff = pred_reliability[:, 1:, :] - pred_reliability[:, :-1, :]
+        return (diff ** 2).mean()
 
-    def _compute_amplitude_skewness(self, input_features: torch.Tensor) -> torch.Tensor:
-        amplitude = input_features[:, :, :, 0, :]  # [B, Q, T, M]
-
-        mean = amplitude.mean(dim=-1, keepdim=True)
-        std = amplitude.std(dim=-1, keepdim=True).clamp_min(self.eps)
-
-        z = (amplitude - mean) / std
-        skewness = (z ** 3).mean(dim=-1)           # [B, Q, T]
-
-        return skewness.permute(0, 2, 1).contiguous()  # [B, T, Q]
-
-    def _compute_amplitude_kurtosis(self, input_features: torch.Tensor) -> torch.Tensor:
-        amplitude = input_features[:, :, :, 0, :]  # [B, Q, T, M]
-
-        mean = amplitude.mean(dim=-1, keepdim=True)
-        std = amplitude.std(dim=-1, keepdim=True).clamp_min(self.eps)
-
-        z = (amplitude - mean) / std
-        kurtosis = (z ** 4).mean(dim=-1)           # [B, Q, T]
-
-        return kurtosis.permute(0, 2, 1).contiguous()  # [B, T, Q]
-
-    def _build_proxy_score(self, input_features: torch.Tensor) -> torch.Tensor:
-        """
-        More stable weak proxy:
-            u = -a * norm(phase_var)
-                -b * norm(|skewness|)
-                -c * norm(|kurtosis - 3|)
-
-        Output:
-            proxy_score: [B, T, Q]
-        """
-        phase_var = self._compute_phase_variance(input_features)                    # [B, T, Q]
-        abs_skewness = torch.abs(self._compute_amplitude_skewness(input_features))  # [B, T, Q]
-        abs_excess_kurt = torch.abs(
-            self._compute_amplitude_kurtosis(input_features) - 3.0
-        )                                                                           # [B, T, Q]
-
-        phase_var = self._normalize_across_aps(phase_var)
-        abs_skewness = self._normalize_across_aps(abs_skewness)
-        abs_excess_kurt = self._normalize_across_aps(abs_excess_kurt)
-
-        proxy_score = (
-            -self.proxy_alpha * phase_var
-            -self.proxy_beta * abs_skewness
-            -self.proxy_gamma * abs_excess_kurt
-        )
-
-        return proxy_score
-
-    # --------------------------------------------------
-    # Loss 2: weak ranking
-    # --------------------------------------------------
-    def _compute_pairwise_ranking_loss(
+    def _target_btq(
         self,
-        logits: torch.Tensor,
-        proxy_score: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        logits: [B, T, Q]
-        proxy_score: [B, T, Q]
+        target_score: torch.Tensor,
+    ) -> torch.Tensor:
+        return target_score.permute(0, 2, 1).contiguous()
 
-        Pairwise logistic ranking loss.
-        Ignore pairs whose proxy gap is too small.
-        """
-        num_aps = logits.shape[-1]
+    def _target_centered_btq(
+        self,
+        target_score: torch.Tensor,
+    ) -> torch.Tensor:
+        target_btq = self._target_btq(target_score)
+        return target_btq - target_btq.mean(dim=-1, keepdim=True)
 
-        logit_gap = logits.unsqueeze(-1) - logits.unsqueeze(-2)          # [B, T, Q, Q]
-        proxy_gap = proxy_score.unsqueeze(-1) - proxy_score.unsqueeze(-2)
+    def _target_reliability_btq(
+        self,
+        target_score: torch.Tensor,
+    ) -> torch.Tensor:
+        target_btq = self._target_btq(target_score)
+        q = target_btq.shape[-1]
+        return q * torch.softmax(target_btq, dim=-1)
 
-        valid_mask = proxy_gap > self.rank_gap_threshold
+    def _rankdata_1d(self, x: torch.Tensor) -> torch.Tensor:
+        order = torch.argsort(x, stable=True)
+        ranks = torch.empty_like(order, dtype=torch.float32)
 
-        eye = torch.eye(num_aps, device=logits.device, dtype=torch.bool)
-        valid_mask = valid_mask & (~eye.unsqueeze(0).unsqueeze(0))
+        i = 0
+        n = x.numel()
+        while i < n:
+            j = i
+            while j + 1 < n and x[order[j + 1]].item() == x[order[i]].item():
+                j += 1
+            avg_rank = 0.5 * (i + j)
+            ranks[order[i : j + 1]] = avg_rank
+            i = j + 1
 
-        pair_loss = F.softplus(-(logit_gap - self.rank_margin))
+        return ranks
 
-        valid_count = valid_mask.sum()
-        if valid_count.item() == 0:
-            zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            return zero, zero
+    def _mean_spearman(
+        self,
+        pred_btq: torch.Tensor,
+        target_btq: torch.Tensor,
+    ) -> float:
+        values = []
 
-        ranking_loss = pair_loss[valid_mask].mean()
-        valid_ratio = valid_mask.float().mean()
+        for b in range(pred_btq.shape[0]):
+            for t in range(pred_btq.shape[1]):
+                px = pred_btq[b, t]
+                tx = target_btq[b, t]
 
-        return ranking_loss, valid_ratio
+                if torch.std(px) < 1e-12 or torch.std(tx) < 1e-12:
+                    values.append(0.0)
+                    continue
 
-    # --------------------------------------------------
-    # Debug
-    # --------------------------------------------------
+                pr = self._rankdata_1d(px)
+                tr = self._rankdata_1d(tx)
+
+                pr = pr - pr.mean()
+                tr = tr - tr.mean()
+
+                denom = torch.sqrt((pr ** 2).sum() * (tr ** 2).sum()).item()
+                if denom < 1e-12:
+                    values.append(0.0)
+                    continue
+
+                corr = float((pr * tr).sum().item() / denom)
+                values.append(corr)
+
+        if not values:
+            return 0.0
+        return float(sum(values) / len(values))
+
+    def _top1_acc(
+        self,
+        pred_btq: torch.Tensor,
+        target_btq: torch.Tensor,
+    ) -> float:
+        pred_top1 = pred_btq.argmax(dim=-1)
+        target_top1 = target_btq.argmax(dim=-1)
+        return float((pred_top1 == target_top1).float().mean().item())
+
+    def _pairwise_acc(
+        self,
+        pred_btq: torch.Tensor,
+        target_btq: torch.Tensor,
+    ) -> float:
+        q = pred_btq.shape[-1]
+        correct = 0
+        total = 0
+
+        for i in range(q):
+            for j in range(i + 1, q):
+                pred_cmp = pred_btq[..., i] > pred_btq[..., j]
+                target_cmp = target_btq[..., i] > target_btq[..., j]
+                correct += int((pred_cmp == target_cmp).sum().item())
+                total += int(pred_cmp.numel())
+
+        if total == 0:
+            return 0.0
+        return float(correct / total)
+
+    def _rel_stats(
+        self,
+        reliability_btq: torch.Tensor,
+    ) -> Dict[str, float]:
+        q = reliability_btq.shape[-1]
+
+        if q >= 2:
+            top2_values = torch.topk(reliability_btq, k=2, dim=-1).values
+            gap = float((top2_values[..., 0] - top2_values[..., 1]).mean().item())
+        else:
+            gap = 0.0
+
+        return {
+            "pred_mean": float(reliability_btq.mean().item()),
+            "pred_max": float(reliability_btq.max().item()),
+            "pred_min": float(reliability_btq.min().item()),
+            "pred_std": float(reliability_btq.std(dim=-1).mean().item()),
+            "top1_top2_gap": gap,
+        }
+
+    def _collect_metrics(
+        self,
+        pred_reliability: torch.Tensor,
+        pred_logits: torch.Tensor,
+        target_score: torch.Tensor,
+        prefix: str,
+    ) -> Dict[str, float]:
+        target_btq = self._target_btq(target_score)
+        target_centered_btq = self._target_centered_btq(target_score)
+        target_reliability_btq = self._target_reliability_btq(target_score)
+
+        score_loss = self._compute_score_loss(pred_logits, target_score)
+
+        out = {
+            f"{prefix}_score_loss": float(score_loss.item()),
+            f"{prefix}_score_spearman": self._mean_spearman(
+                pred_logits, target_centered_btq
+            ),
+            f"{prefix}_score_top1_acc": self._top1_acc(
+                pred_logits, target_centered_btq
+            ),
+            f"{prefix}_reliability_top1_acc": self._top1_acc(
+                pred_reliability, target_reliability_btq
+            ),
+            f"{prefix}_reliability_pairwise_acc": self._pairwise_acc(
+                pred_reliability, target_reliability_btq
+            ),
+        }
+
+        rel_stats = self._rel_stats(pred_reliability)
+        for key, value in rel_stats.items():
+            out[f"{prefix}_{key}"] = value
+
+        out[f"{prefix}_target_score_mean"] = float(target_btq.mean().item())
+        out[f"{prefix}_target_score_max"] = float(target_btq.max().item())
+        out[f"{prefix}_target_score_min"] = float(target_btq.min().item())
+
+        return out
+
     def _cache_debug_tensors(
         self,
-        logits_a: torch.Tensor,
-        logits_b: torch.Tensor,
-        reliability: torch.Tensor,
-        proxy_score: torch.Tensor,
-        phase_var: torch.Tensor,
+        train_pred_reliability: torch.Tensor,
+        train_pred_logits: torch.Tensor,
+        eval_pred_reliability: torch.Tensor,
+        eval_pred_logits: torch.Tensor,
+        target_score: torch.Tensor,
     ) -> None:
         with torch.no_grad():
-            top2_values, top2_indices = torch.topk(
-                reliability,
-                k=min(2, reliability.shape[-1]),
-                dim=-1,
-            )
+            target_btq = self._target_btq(target_score)
+            target_centered_btq = self._target_centered_btq(target_score)
 
-            if reliability.shape[-1] >= 2:
-                top1_top2_gap = top2_values[..., 0] - top2_values[..., 1]
-            else:
-                top1_top2_gap = torch.zeros(
-                    reliability.shape[:2],
-                    device=reliability.device,
-                    dtype=reliability.dtype,
+            train_score_mse_map = (train_pred_logits - target_centered_btq) ** 2
+            eval_score_mse_map = (eval_pred_logits - target_centered_btq) ** 2
+
+            def _top1_gap(x: torch.Tensor) -> torch.Tensor:
+                top2_values, top2_indices = torch.topk(
+                    x,
+                    k=min(2, x.shape[-1]),
+                    dim=-1,
                 )
 
+                if x.shape[-1] >= 2:
+                    gap = top2_values[..., 0] - top2_values[..., 1]
+                else:
+                    gap = torch.zeros(
+                        x.shape[:2],
+                        device=x.device,
+                        dtype=x.dtype,
+                    )
+                return top2_indices[..., 0], gap
+
+            train_top1_ap, train_gap = _top1_gap(train_pred_reliability)
+            eval_top1_ap, eval_gap = _top1_gap(eval_pred_reliability)
+
             self.last_debug_tensors = {
-                "logits_a": logits_a.detach().cpu(),
-                "logits_b": logits_b.detach().cpu(),
-                "reliability": reliability.detach().cpu(),
-                "proxy_score": proxy_score.detach().cpu(),
-                "phase_var": phase_var.detach().cpu(),
-                "top1_ap": top2_indices[..., 0].detach().cpu(),
-                "top1_top2_gap": top1_top2_gap.detach().cpu(),
+                "train_pred_reliability": train_pred_reliability.detach().cpu(),
+                "train_pred_logits": train_pred_logits.detach().cpu(),
+                "eval_pred_reliability": eval_pred_reliability.detach().cpu(),
+                "eval_pred_logits": eval_pred_logits.detach().cpu(),
+                "target_score": target_score.detach().cpu(),
+                "target_score_btq": target_btq.detach().cpu(),
+                "target_score_centered_btq": target_centered_btq.detach().cpu(),
+                "train_score_mse_map": train_score_mse_map.detach().cpu(),
+                "eval_score_mse_map": eval_score_mse_map.detach().cpu(),
+                "train_top1_ap": train_top1_ap.detach().cpu(),
+                "eval_top1_ap": eval_top1_ap.detach().cpu(),
+                "train_top1_top2_gap": train_gap.detach().cpu(),
+                "eval_top1_top2_gap": eval_gap.detach().cpu(),
             }
 
     def get_debug_tensors(self) -> Dict[str, torch.Tensor]:
         return self.last_debug_tensors
 
-    # --------------------------------------------------
-    # Training step
-    # --------------------------------------------------
-    def step(self, input_features: torch.Tensor) -> Dict[str, float]:
-        """
-        Input:
-            input_features: [B, Q, T, C, M]
-
-        Returns:
-            training metrics dict
-        """
-        if input_features.ndim != 5:
+    def step(
+        self,
+        pattern: torch.Tensor,
+        target_score: torch.Tensor,
+    ) -> Dict[str, float]:
+        if pattern.ndim != 5:
             raise ValueError(
-                f"Expected input_features with shape [B, Q, T, C, M], got {tuple(input_features.shape)}"
+                f"Expected pattern with shape [B, Q, T, C, M], got {tuple(pattern.shape)}"
             )
 
-        self.encoder.train()
-        self.reliability_head.train()
+        if target_score.ndim != 3:
+            raise ValueError(
+                f"Expected target_score with shape [B, Q, T], got {tuple(target_score.shape)}"
+            )
 
-        # 1) two mild views
-        view_a, view_b = self._build_two_views(input_features)
+        if self.force_eval_mode_during_fit:
+            self.model.eval()
+        else:
+            self.model.train()
 
-        # 2) encode
-        encoded_a = self._encode_from_features(view_a)  # [B, T, Q, D]
-        encoded_b = self._encode_from_features(view_b)  # [B, T, Q, D]
-
-        # 3) score
-        reliability_a, logits_a = self.reliability_head(encoded_a, return_logits=True)
-        reliability_b, logits_b = self.reliability_head(encoded_b, return_logits=True)
-
-        # 4) consistency
-        consistency_loss = self._compute_consistency_loss(logits_a, logits_b)
-
-        # 5) weak ranking
-        with torch.no_grad():
-            proxy_score = self._build_proxy_score(input_features)       # [B, T, Q]
-            phase_var = self._compute_phase_variance(input_features)    # [B, T, Q]
-
-        ranking_loss, valid_pair_ratio = self._compute_pairwise_ranking_loss(
-            logits=0.5 * (logits_a + logits_b),
-            proxy_score=proxy_score,
+        train_pred_reliability, train_pred_logits = self.model(
+            pattern,
+            return_logits=True,
         )
 
+        score_loss = self._compute_score_loss(train_pred_logits, target_score)
+        smoothness_loss = self._compute_smoothness_loss(train_pred_reliability)
+
         total_loss = (
-            self.lambda_consistency * consistency_loss
-            + self.lambda_ranking * ranking_loss
+            self.loss_weight_proxy * score_loss
+            + self.loss_weight_smooth * smoothness_loss
         )
 
         self.optimizer.zero_grad()
@@ -434,51 +343,64 @@ class TrainStage:
 
         if self.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(
-                list(self.encoder.parameters()) + list(self.reliability_head.parameters()),
+                self.model.parameters(),
                 max_norm=self.grad_clip_norm,
             )
 
         self.optimizer.step()
 
-        reliability = 0.5 * (reliability_a + reliability_b)
-
-        self._cache_debug_tensors(
-            logits_a=logits_a,
-            logits_b=logits_b,
-            reliability=reliability,
-            proxy_score=proxy_score,
-            phase_var=phase_var,
-        )
-
+        self.model.eval()
         with torch.no_grad():
-            top2_values, _ = torch.topk(
-                reliability,
-                k=min(2, reliability.shape[-1]),
-                dim=-1,
+            eval_pred_reliability, eval_pred_logits = self.model(
+                pattern,
+                return_logits=True,
             )
 
-            if reliability.shape[-1] >= 2:
-                top1_top2_gap = (top2_values[..., 0] - top2_values[..., 1]).mean()
-            else:
-                top1_top2_gap = torch.tensor(0.0, device=reliability.device)
+        self._cache_debug_tensors(
+            train_pred_reliability=train_pred_reliability,
+            train_pred_logits=train_pred_logits,
+            eval_pred_reliability=eval_pred_reliability,
+            eval_pred_logits=eval_pred_logits,
+            target_score=target_score,
+        )
 
-        return {
-            "loss": total_loss.item(),
-            "consistency_loss": consistency_loss.item(),
-            "ranking_loss": ranking_loss.item(),
-            "valid_pair_ratio": valid_pair_ratio.item(),
-            "mean_reliability": reliability.mean().item(),
-            "max_reliability": reliability.max().item(),
-            "min_reliability": reliability.min().item(),
-            "top1_top2_gap": top1_top2_gap.item(),
-            "proxy_score_mean": proxy_score.mean().item(),
-            "phase_var_mean": phase_var.mean().item(),
+        metrics = {
+            "loss": float(total_loss.item()),
+            "score_loss": float(score_loss.item()),
+            "smoothness_loss": float(smoothness_loss.item()),
         }
+
+        metrics.update(
+            self._collect_metrics(
+                pred_reliability=train_pred_reliability.detach(),
+                pred_logits=train_pred_logits.detach(),
+                target_score=target_score.detach(),
+                prefix="train",
+            )
+        )
+
+        metrics.update(
+            self._collect_metrics(
+                pred_reliability=eval_pred_reliability.detach(),
+                pred_logits=eval_pred_logits.detach(),
+                target_score=target_score.detach(),
+                prefix="eval",
+            )
+        )
+
+        # backward-compatible keys for runtime publish gate
+        metrics["pred_mean"] = metrics["eval_pred_mean"]
+        metrics["pred_max"] = metrics["eval_pred_max"]
+        metrics["pred_min"] = metrics["eval_pred_min"]
+        metrics["pred_std"] = metrics["eval_pred_std"]
+        metrics["target_score_mean"] = metrics["eval_target_score_mean"]
+        metrics["target_score_max"] = metrics["eval_target_score_max"]
+        metrics["target_score_min"] = metrics["eval_target_score_min"]
+        metrics["top1_top2_gap"] = metrics["eval_top1_top2_gap"]
+
+        return metrics
 
     def get_state_dict(self) -> Dict[str, Any]:
         return {
-            "encoder": {k: v.cpu() for k, v in self.encoder.state_dict().items()},
-            "reliability_head": {
-                k: v.cpu() for k, v in self.reliability_head.state_dict().items()
-            },
+            "model": {k: v.cpu() for k, v in self.model.state_dict().items()},
         }

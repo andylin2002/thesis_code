@@ -6,11 +6,6 @@ from typing import List
 
 
 class ResidualTCNBlock(nn.Module):
-    """
-    Residual temporal block for TCN.
-    Input / Output shape:
-        [B, C, T]
-    """
     def __init__(
         self,
         channels: int,
@@ -64,31 +59,59 @@ class ResidualTCNBlock(nn.Module):
         return out
 
 
+class APContextBlock(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int = 4,
+        ff_hidden: int = 128,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.drop1 = nn.Dropout(dropout)
+
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, ff_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_hidden, embed_dim),
+        )
+        self.drop2 = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn_in = self.norm1(x)
+        attn_out, _ = self.attn(attn_in, attn_in, attn_in, need_weights=False)
+        x = x + self.drop1(attn_out)
+
+        ff_in = self.norm2(x)
+        ff_out = self.ff(ff_in)
+        x = x + self.drop2(ff_out)
+        return x
+
+
 class CSIEncoder(nn.Module):
-    """
-    Lightweight CSI encoder for AP-level reliability representation.
-
-    Input:
-        x: [B_flat, T, C, M]
-            B_flat = batch_size * num_aps
-            T = number of time steps
-            C = feature channels
-                - channel 0: normalized amplitude
-                - channel 1..: wrapped phase-difference channels
-            M = number of subcarriers
-
-    Output:
-        z: [B_flat, T, latent_dim]
-    """
     def __init__(
         self,
         num_feature_channels: int,
         num_subcarriers: int,
+        num_aps: int,
         cnn_channels: List[int] = [16, 32],
         cnn_kernel_size: int = 3,
         tcn_hidden: int = 64,
         tcn_kernel_size: int = 3,
         tcn_dilations: List[int] = [1, 2, 4],
+        ap_num_heads: int = 4,
+        ap_num_layers: int = 2,
+        ap_ff_hidden: int = 128,
         mlp_hidden: int = 64,
         latent_dim: int = 128,
         proj_dim: int = 64,
@@ -98,16 +121,11 @@ class CSIEncoder(nn.Module):
 
         self.num_feature_channels = num_feature_channels
         self.num_subcarriers = num_subcarriers
+        self.num_aps = num_aps
         self.latent_dim = latent_dim
 
-        # --------------------------------------------------
-        # 1) Per-time-step local encoder: 1D CNN over subcarriers
-        # Input at each time step: [C, M]
-        # Output at each time step: [cnn_channels[-1]]
-        # --------------------------------------------------
         cnn_layers = []
         in_ch = num_feature_channels
-
         for out_ch in cnn_channels:
             cnn_layers.append(
                 nn.Conv1d(
@@ -123,23 +141,16 @@ class CSIEncoder(nn.Module):
             in_ch = out_ch
 
         self.local_cnn = nn.Sequential(*cnn_layers)
-        self.global_pool = nn.AdaptiveAvgPool1d(1)  # [B, C, M] -> [B, C, 1]
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
 
         local_feature_dim = cnn_channels[-1]
 
-        # --------------------------------------------------
-        # 2) Temporal projection before TCN
-        # --------------------------------------------------
         self.temporal_in = nn.Sequential(
             nn.Linear(local_feature_dim, tcn_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
 
-        # --------------------------------------------------
-        # 3) TCN over time
-        # Input / output: [B_flat, tcn_hidden, T]
-        # --------------------------------------------------
         tcn_blocks = []
         for dilation in tcn_dilations:
             tcn_blocks.append(
@@ -152,9 +163,24 @@ class CSIEncoder(nn.Module):
             )
         self.tcn = nn.Sequential(*tcn_blocks)
 
-        # --------------------------------------------------
-        # 4) Latent head
-        # --------------------------------------------------
+        self.ap_context = nn.ModuleList(
+            [
+                APContextBlock(
+                    embed_dim=tcn_hidden,
+                    num_heads=ap_num_heads,
+                    ff_hidden=ap_ff_hidden,
+                    dropout=dropout,
+                )
+                for _ in range(ap_num_layers)
+            ]
+        )
+
+        self.fusion = nn.Sequential(
+            nn.Linear(tcn_hidden * 2, tcn_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
         self.mlp = nn.Sequential(
             nn.Linear(tcn_hidden, mlp_hidden),
             nn.ReLU(),
@@ -162,9 +188,6 @@ class CSIEncoder(nn.Module):
             nn.Linear(mlp_hidden, latent_dim),
         )
 
-        # --------------------------------------------------
-        # 5) Optional projection head
-        # --------------------------------------------------
         self.projection = nn.Sequential(
             nn.Linear(latent_dim, proj_dim),
             nn.ReLU(),
@@ -172,14 +195,6 @@ class CSIEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, return_projection: bool = False) -> torch.Tensor:
-        """
-        Args:
-            x: [B_flat, T, C, M]
-            return_projection: whether to return projected features
-
-        Returns:
-            z: [B_flat, T, latent_dim] or [B_flat, T, proj_dim]
-        """
         if x.ndim != 4:
             raise ValueError(f"Expected input shape [B_flat, T, C, M], got {tuple(x.shape)}")
 
@@ -193,38 +208,42 @@ class CSIEncoder(nn.Module):
             raise ValueError(
                 f"Expected num_subcarriers={self.num_subcarriers}, got {m_subcarriers}"
             )
+        if b_flat % self.num_aps != 0:
+            raise ValueError(
+                f"B_flat={b_flat} is not divisible by num_aps={self.num_aps}"
+            )
 
-        # --------------------------------------------------
-        # Per-time-step local encoding
-        # [B_flat, T, C, M] -> [B_flat*T, C, M]
-        # --------------------------------------------------
+        batch_size = b_flat // self.num_aps
+
         x_local = x.reshape(b_flat * t_steps, c_channels, m_subcarriers)
 
-        local_feat = self.local_cnn(x_local)              # [B_flat*T, C_last, M]
-        local_feat = self.global_pool(local_feat)         # [B_flat*T, C_last, 1]
-        local_feat = local_feat.squeeze(-1)               # [B_flat*T, C_last]
+        local_feat = self.local_cnn(x_local)
+        local_feat = self.global_pool(local_feat).squeeze(-1)
+        local_feat = local_feat.view(b_flat, t_steps, -1)
 
-        # Restore temporal dimension
-        local_feat = local_feat.view(b_flat, t_steps, -1) # [B_flat, T, local_feature_dim]
+        temporal_feat = self.temporal_in(local_feat)
+        temporal_feat = temporal_feat.transpose(1, 2).contiguous()
+        temporal_feat = self.tcn(temporal_feat)
+        temporal_feat = temporal_feat.transpose(1, 2).contiguous()  # [B_flat, T, H]
 
-        # --------------------------------------------------
-        # Temporal projection
-        # --------------------------------------------------
-        temporal_feat = self.temporal_in(local_feat)      # [B_flat, T, tcn_hidden]
+        h = temporal_feat.view(batch_size, self.num_aps, t_steps, -1)          # [B, Q, T, H]
+        h = h.permute(0, 2, 1, 3).contiguous()                                  # [B, T, Q, H]
+        h = h.view(batch_size * t_steps, self.num_aps, -1)                      # [B*T, Q, H]
 
-        # --------------------------------------------------
-        # TCN expects [B, C, T]
-        # --------------------------------------------------
-        temporal_feat = temporal_feat.transpose(1, 2).contiguous()  # [B_flat, tcn_hidden, T]
-        temporal_feat = self.tcn(temporal_feat)                     # [B_flat, tcn_hidden, T]
-        temporal_feat = temporal_feat.transpose(1, 2).contiguous()  # [B_flat, T, tcn_hidden]
+        for block in self.ap_context:
+            h = block(h)
 
-        # --------------------------------------------------
-        # Latent mapping
-        # --------------------------------------------------
-        z = self.mlp(temporal_feat)  # [B_flat, T, latent_dim]
+        h = h.view(batch_size, t_steps, self.num_aps, -1)                       # [B, T, Q, H]
+        h = h.permute(0, 2, 1, 3).contiguous()                                  # [B, Q, T, H]
+
+        base = temporal_feat.view(batch_size, self.num_aps, t_steps, -1)        # [B, Q, T, H]
+        fused = torch.cat([base, h], dim=-1)                                     # [B, Q, T, 2H]
+        fused = self.fusion(fused)                                               # [B, Q, T, H]
+
+        fused = fused.view(b_flat, t_steps, -1)                                  # [B_flat, T, H]
+        z = self.mlp(fused)                                                      # [B_flat, T, latent_dim]
 
         if return_projection:
-            return self.projection(z)  # [B_flat, T, proj_dim]
+            return self.projection(z)
 
         return z

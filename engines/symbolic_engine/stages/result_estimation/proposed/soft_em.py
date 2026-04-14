@@ -50,7 +50,7 @@ class SoftEMAlgorithm:
         self.neighbor_matrix = nm.to(device=device, dtype=torch.long)
 
         self.emission_log_probs_qgt: Optional[torch.Tensor] = None
-        self.spatiotemporal_probs_gt: Optional[torch.Tensor] = None
+        self.posterior_gt: Optional[torch.Tensor] = None
         self.reliability: Optional[torch.Tensor] = None
 
         # Pre-calculate Parameters using in tof penalty calculation
@@ -93,18 +93,18 @@ class SoftEMAlgorithm:
             emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)  # (G, T)
             
             # 2. E-Step: Compute Spatio-Temporal Probability Distribution (Posterior)
-            stpd_gt = soft_em_utils.run_forward_backward(
+            posterior_gt = soft_em_utils.run_forward_backward(
                 emission_log_probs_gt,
                 self.neighbor_matrix,
                 self.device
             )
-            self.spatiotemporal_probs_gt = stpd_gt
+            self.posterior_gt = posterior_gt
             
             # 3. M-Step: Update Parameters using Soft Weights
             new_params = soft_em_utils.update_soft_parameters(
                 self.features,
                 self.propagation_params,
-                stpd_gt,
+                posterior_gt,
                 self.grid_angle_qg
             )
             
@@ -148,23 +148,45 @@ class SoftEMAlgorithm:
 
         self.reliability = reliability
 
-    def get_final_epd(self) -> torch.Tensor:
+    def get_emission_log_probs_qgt(self) -> torch.Tensor:
+        """
+        Returns per-AP emission log probabilities with shape (Q, G, T).
+
+        Args:
+            apply_reliability:
+                False -> return raw per-AP emission from symbolic model
+                True  -> return reliability-weighted per-AP emission
+
+        Returns:
+            Tensor of shape (Q, G, T)
+        """
         if self.emission_log_probs_qgt is None:
             raise RuntimeError("Run step_parameters() first!")
 
-        final_epd_qgt = self.emission_log_probs_qgt.clone()
+        emission_log_probs_qgt = self.emission_log_probs_qgt.clone()
+
+        return emission_log_probs_qgt
+
+    def get_emission_log_probs_gt(self) -> torch.Tensor:
+        if self.emission_log_probs_qgt is None:
+            raise RuntimeError("Run step_parameters() first!")
+
+        emission_log_probs_qgt = self.emission_log_probs_qgt.clone()
 
         if self.reliability is not None:
-            final_epd_qgt = final_epd_qgt * self.reliability.unsqueeze(1)
+            emission_log_probs_qgt = emission_log_probs_qgt * self.reliability.unsqueeze(1)
 
-        final_epd_gt = torch.sum(final_epd_qgt, dim=0)
-        return final_epd_gt
+        emission_log_probs_gt = torch.sum(emission_log_probs_qgt, dim=0)
+        return emission_log_probs_gt
     
-    def get_final_stpd(self) -> torch.Tensor:
+    def get_posterior_gt(self) -> torch.Tensor:
         """ Returns the STPD from the last iteration. """
-        if self.spatiotemporal_probs_gt is None:
+        if self.posterior_gt is None:
             raise RuntimeError("Run step_parameters() first!")
-        return self.spatiotemporal_probs_gt
+        
+        posterior_gt = self.posterior_gt.clone()
+
+        return posterior_gt
     
     def _calculate_tof_params(self) -> Dict[str, float]:
         """
@@ -216,36 +238,8 @@ class SoftEMAlgorithm:
 
         emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)
 
-        self.spatiotemporal_probs_gt = soft_em_utils.run_forward_backward(
+        self.posterior_gt = soft_em_utils.run_forward_backward(
             emission_log_probs_gt,
             self.neighbor_matrix,
             self.device
         )
-
-    # DEBUG
-    def get_epd_qgt(self, apply_reliability: bool = False) -> torch.Tensor:
-        """
-        Returns per-AP emission log probabilities with shape (Q, G, T).
-
-        Args:
-            apply_reliability:
-                False -> return raw per-AP emission from symbolic model
-                True  -> return reliability-weighted per-AP emission
-
-        Returns:
-            Tensor of shape (Q, G, T)
-        """
-        if self.emission_log_probs_qgt is None:
-            raise RuntimeError("Run step_parameters() first!")
-
-        epd_qgt = self.emission_log_probs_qgt.clone()
-
-        if apply_reliability:
-            if self.reliability is None:
-                raise RuntimeError(
-                    "apply_reliability=True but reliability is None. "
-                    "Call set_reliability() first or use apply_reliability=False."
-                )
-            epd_qgt = epd_qgt * self.reliability.unsqueeze(1)  # (Q,1,T) broadcast to (Q,G,T)
-
-        return epd_qgt

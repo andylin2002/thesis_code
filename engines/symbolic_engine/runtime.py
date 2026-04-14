@@ -8,11 +8,7 @@ from .modules.factory import SystemFactory
 
 class SymbolicRuntime:
     """
-    Orchestrates the symbolic pipeline:
-    - build strategies once (signal_processor, location_estimator)
-    - apply latest gating update (from model_queue)
-    - run extract -> estimate
-    - return CPU-safe payload for IPC
+    
     """
 
     def __init__(self, config, device, reference_grid, directions_vectors, model_queue=None):
@@ -44,12 +40,6 @@ class SymbolicRuntime:
     def step(self, raw_csi_block_cpu):
         """
         Run one inference step for one CSI block.
-
-        Input:
-            raw_csi_block_cpu: torch.Tensor on CPU (sent from main process)
-
-        Output:
-            pkg_cpu: dict with CPU tensors only (safe for multiprocessing.Queue)
         """
         # Move to GPU for processing
         raw_csi_block = raw_csi_block_cpu.to(self.device)
@@ -60,26 +50,25 @@ class SymbolicRuntime:
 
         # Stage 1: Signal Processing
         features = self.signal_processor.extract(raw_csi_block)
+        
+        aggregated_csi = getattr(self.signal_processor, "aggregated_csi", None)
 
         # Stage 2: Location Estimation
         trajectory = self.location_estimator.estimate(features, raw_csi_block)
 
-        # DEBUG OUTPUT
-        epd_qgt = getattr(self.location_estimator, "epd_qgt", None)
-        epd = getattr(self.location_estimator, "epd", None)
-        stpd = getattr(self.location_estimator, "stpd", None)
-        tpd = getattr(self.location_estimator, "tpd", None)
+        emission_log_probs_qgt = getattr(self.location_estimator, "emission_log_probs_qgt", None)
+        posterior_gt = getattr(self.location_estimator, "posterior_gt", None)
         reliability = getattr(self.location_estimator, "reliability", None)
 
         # Package (future-proof: dict payload)
         pkg = {
             "trajectory": trajectory,
-            "epd_qgt": epd_qgt, 
-            "epd": epd, 
-            "stpd": stpd, 
-            "tpd": tpd, 
-            "features": features,
-            "reliability": reliability
+            "aggregated_csi": aggregated_csi, 
+            "emission_log_probs_qgt": emission_log_probs_qgt,
+            "posterior_gt": posterior_gt, 
+            "reliability": reliability, 
+            "features": features, # DEBUG
+            "aggregated_csi": aggregated_csi
         }
 
         # Convert to CPU-safe package
@@ -88,8 +77,7 @@ class SymbolicRuntime:
 
     def _recursive_detach_cpu(self, data):
         """
-        Helper: Recursively move Tensors in dict/list/tuple to CPU.
-        Removes GPU dependency for IPC safety.
+        
         """
         if isinstance(data, torch.Tensor):
             return data.detach().cpu()
@@ -104,14 +92,7 @@ class SymbolicRuntime:
 
     def _apply_latest_gating_state_dict(self):
         """
-        Drain model_queue and apply the latest state_dict to the location estimator.
-
-        Expected payload format:
-            {"state_dict": <dict or None>, "step": <int optional>}
-
-        Notes:
-        - Do NOT use model_queue.empty() in multiprocessing; it is not reliable.
-        - Use get_nowait() + Empty to drain safely.
+        
         """
         latest = None
         while True:

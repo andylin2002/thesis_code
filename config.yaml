@@ -3,13 +3,6 @@
 ### --- LOOP --- ###
 LOOP: False
 
-### --- TIME --- ###
-TIME: False
-
-### --- Threads --- ###
-RUN_SYM: True
-RUN_NEU: True
-
 ### --- System Mode --- ###
 #SYSTEM_MODE: 'BASELINE'
 SYSTEM_MODE: 'PROPOSED'
@@ -18,7 +11,7 @@ SYSTEM_MODE: 'PROPOSED'
 DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
 HMATRIX_LIST:
-  - "NLoS_t150_ch36_ant3" #NLoS_t150_ch36_ant3, train_direct, NLoS_t799_ch36_ant3
+  - "NLoS_t150_ch36_ant3" #NLoS_t150_ch36_ant3, train_direct, NLoS_t799_ch36_ant3, train_wander
 
 ### --- Grid Generation Parameters --- ###
 GRID_RESOLUTION_M: 0.5
@@ -42,6 +35,7 @@ NUM_PACKET: 1                             # notation: P
 BASELINE_AOA_METHOD: 'mmp'              # 'music' or 'mmp'
 USE_SOFT_EM: True
 USE_TOF_GAIN_WEIGHT: True
+USE_NEURAL: True
 
 ### --- 3. neural_worker Setup --- ###
 NEURAL_SLEEP: 0.05
@@ -56,7 +50,7 @@ NEURAL_DEBUG_DIR: output/neural_debug
 NEURAL_DEBUG_SAVE_INTERVAL: 1
 
 LATENT_DIM: 128
-LR: 0.001
+LR: 0.0005
 GRAD_CLIP_NORM: 1.0
 
 LOSS_WEIGHT_CONS: 0.1

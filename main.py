@@ -53,9 +53,8 @@ def main():
     config['EM_MAX_ITER'] = args.em_max_iter
     config['ROUND'] = args.round
 
-    # Toggles to enable or disable system workers
-    RUN_SYM = config.get('RUN_SYM', True)
-    RUN_NEU = config.get('RUN_NEU', True)
+    # Symbolic is always required; neural is optional
+    use_neural = config.get('USE_NEURAL', True)
     
     # Generate Reference Grid
     x_bounds = config.get("X_BOUNDS")
@@ -105,18 +104,17 @@ def main():
 
     # 6. Initialize Workers
     print(f"[System] Initializing workers in {config.get('SYSTEM_MODE')} mode...")
-    
-    if RUN_SYM:
-        symbolic_worker = SymbolicWorker(
-            name="SymbolicWorker",
-            config=config,
-            queues=queues,
-            stop_event=stop_event,
-            reference_grid=reference_grid,
-            directions_vectors=directions_vectors
-        )
 
-    if RUN_NEU:
+    symbolic_worker = SymbolicWorker(
+        name="SymbolicWorker",
+        config=config,
+        queues=queues,
+        stop_event=stop_event,
+        reference_grid=reference_grid,
+        directions_vectors=directions_vectors
+    )
+
+    if use_neural:
         neural_worker = NeuralWorker(
             name="NeuralWorker",
             config=config,
@@ -125,9 +123,8 @@ def main():
         )
 
     # 7. Start Processes
-    if RUN_SYM:
-        symbolic_worker.start()
-    if RUN_NEU:
+    symbolic_worker.start()
+    if use_neural:
         neural_worker.start()
 
     # 8. Main Loop (Modified for iterative Injection -> Collection -> Saving)
@@ -159,70 +156,68 @@ def main():
                 print(f"[System] Injecting {len(csi_blocks)} blocks from {hmatrix_file}...")
                 
                 for block in csi_blocks:
-                    # Send CPU tensor to avoid CUDA IPC locks
-                    if RUN_SYM:
-                        queues['data_symbolic'].put(block.cpu())
-                    if RUN_NEU:
-                        queues['data_neural'].put(block.cpu())
+                    # Sends raw CSI to symbolic worker
+                    queues['data_symbolic'].put(block.cpu())
 
             if total_batches_in_round == 0:
                 print("[System] No data found in this round. Exiting.")
                 break
 
-            if RUN_SYM:
-                # --- Phase 2: Collection ---
-                print(f"[System] Waiting for {total_batches_in_round} results...")
-                
-                # Containers for THIS round
-                round_trajectories = []
-                round_epds_qgt = [] 
-                round_epds = []
-                round_stpds = []
-                round_rels = []
+            # --- Phase 2: Collection ---
+            print(f"[System] Waiting for {total_batches_in_round} results...")
+            
+            # Containers for THIS round
+            round_trajectory = []
+            round_emission_log_probs = []
+            round_posterior = []
+            round_reliability = []
+            round_aggregated_csi = [] # DEBUG
 
-                received_count = 0
-                while received_count < total_batches_in_round:
-                    try:
-                        payload = queues["out"].get(timeout=None)
-                        received_count += 1
+            received_count = 0
+            while received_count < total_batches_in_round:
+                try:
+                    payload = queues["out"].get(timeout=None)
+                    received_count += 1
 
-                        # Data Collection
-                        traj = utils.to_numpy(payload.get("trajectory"))
-                        if traj is not None: round_trajectories.append(traj)
-                        epd_qgt = utils.to_numpy(payload.get("epd_qgt"))
-                        if epd_qgt is not None: round_epds_qgt.append(epd_qgt)
-                        epd = utils.to_numpy(payload.get("epd"))
-                        if epd is not None: round_epds.append(epd)
-                        stpd = utils.to_numpy(payload.get("stpd"))
-                        if stpd is not None: round_stpds.append(stpd)
-                        rel = utils.to_numpy(payload.get("reliability"))
-                        if rel is not None: round_rels.append(rel)
+                    # Data Collection
+                    trajectory = utils.to_numpy(payload.get("trajectory"))
+                    if trajectory is not None: round_trajectory.append(trajectory)
+                    emission_log_probs_qgt = utils.to_numpy(payload.get("emission_log_probs_qgt"))
+                    if emission_log_probs_qgt is not None: round_emission_log_probs.append(emission_log_probs_qgt)
+                    posterior_gt = utils.to_numpy(payload.get("posterior_gt"))
+                    if posterior_gt is not None: round_posterior.append(posterior_gt)
+                    reliability = utils.to_numpy(payload.get("reliability"))
+                    if reliability is not None: round_reliability.append(reliability)
+                    # DEBUG BEGIN
+                    aggregated_csi = utils.to_numpy(payload.get("aggregated_csi"))
+                    if aggregated_csi is not None: round_aggregated_csi.append(aggregated_csi)
+                    # DEBUG END
 
-                    except Exception as e:
-                        print(f"\n[System] Collection Error: {e}")
-                        break
+                except Exception as e:
+                    print(f"\n[System] Collection Error: {e}")
+                    break
 
-                # --- Phase 3: Saving (Overwriting previous files) ---
-                print("[System] Saving/Overwriting outputs...")
+            # --- Phase 3: Saving (Overwriting previous files) ---
+            print("[System] Saving/Overwriting outputs...")
 
-                # Saving
-                if round_trajectories:
-                    np.save("output/predicted_trajectory.npy", np.concatenate(round_trajectories, axis=0))
-                if round_epds_qgt:
-                    np.save("output/epd_qgt.npy", np.concatenate(round_epds_qgt, axis=2))
-                if round_epds:
-                    np.save("output/epd.npy", np.concatenate(round_epds, axis=1))
-                if round_stpds:
-                    np.save("output/stpd.npy", np.concatenate(round_stpds, axis=1))
-                if round_rels:
-                    np.save("output/reliability.npy", np.stack(round_rels, axis=0))
-                
-            else:
-                print("[System] Neural-only mode: Skipping results collection.")
+            # Saving
+            if round_trajectory:
+                np.save("output/predicted_trajectory.npy", np.concatenate(round_trajectory, axis=0))
+            if round_emission_log_probs:
+                np.save("output/emission_log_probs_qgt.npy", np.concatenate(round_emission_log_probs, axis=2))
+            if round_posterior:
+                np.save("output/posterior_gt.npy", np.concatenate(round_posterior, axis=1))
+            if round_reliability:
+                np.save("output/reliability.npy", np.stack(round_reliability, axis=0))
+            # DEBUG BEGIN
+            if round_aggregated_csi:
+                np.save("output/aggregated_csi.npy", np.stack(round_aggregated_csi, axis=0))
+            # DEBUG END
 
             # Queue Join
-            if RUN_SYM: queues['data_symbolic'].join()
-            if RUN_NEU: queues['data_neural'].join()
+            queues['data_symbolic'].join()
+            if use_neural: 
+                queues['data_neural'].join()
 
             if not loop_mode:
                 break
@@ -238,10 +233,10 @@ def main():
         while not queues['out'].empty(): queues['out'].get()
         while not queues['model'].empty(): queues['model'].get()
         
-        if RUN_SYM:
-            symbolic_worker.join(timeout=2)
-            if symbolic_worker.is_alive(): symbolic_worker.terminate()
-        if RUN_NEU:
+        
+        symbolic_worker.join(timeout=2)
+        if symbolic_worker.is_alive(): symbolic_worker.terminate()
+        if use_neural:
             neural_worker.join(timeout=2)
             if neural_worker.is_alive(): neural_worker.terminate()
         

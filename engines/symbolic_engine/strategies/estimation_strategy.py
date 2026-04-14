@@ -105,11 +105,9 @@ class ProposedEstimatorStrategy(IEstimator):
             'grid_neighbor_delay_diff_qgk': grid_neighbor_delay_diff_qgk,
         }
 
-        #DEBUG
-        self.latest_gating_step = None
-        self.gating_ap_probs = None
-        self.gating_scores = None
-        self.gating_debug = None
+        # Neural's input
+        self.emission_log_probs_qgt = None
+        self.posterior_gt = None
         self.reliability = None
     
     # =========================================================
@@ -121,7 +119,6 @@ class ProposedEstimatorStrategy(IEstimator):
             return
 
         self.gating_evaluator.load_state_dict(state_dict)
-        self.latest_gating_step = step
 
     # =========================================================
     # Main estimation
@@ -158,10 +155,9 @@ class ProposedEstimatorStrategy(IEstimator):
 
         trajectory = estimator.solve()
 
-        # DEBUG OUTPUT
-        self.epd_qgt = getattr(estimator, 'epd_qgt', None)
-        self.epd = getattr(estimator, 'epd', None)
-        self.stpd = getattr(estimator, 'stpd', None)
+        # Neural's input
+        self.emission_log_probs_qgt = getattr(estimator, 'emission_log_probs_qgt', None)
+        self.posterior_gt = getattr(estimator, 'posterior_gt', None)
         self.reliability = reliability
             
         return trajectory

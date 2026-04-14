@@ -1,6 +1,7 @@
 # workers/symbolic_worker.py
 
 from queue import Empty
+from typing import Optional
 
 import utils
 from core.interfaces import BaseWorker
@@ -16,10 +17,9 @@ class SymbolicWorker(BaseWorker):
 
     def __init__(self, name, config, queues, stop_event, reference_grid, directions_vectors):
         super().__init__(name, config, queues, stop_event)
+        self.runtime: Optional[SymbolicRuntime] = None
         self.reference_grid = reference_grid
         self.directions_vectors = directions_vectors
-
-        self.runtime = None
 
     def _setup(self):
         model_queue = self.queues.get("model", None)
@@ -35,11 +35,12 @@ class SymbolicWorker(BaseWorker):
         print(f"[{self.name}] Setup complete. Runtime loaded.")
 
     def _loop(self):
-        in_queue = self.queues["data_symbolic"]               # Raw CSI input (CPU tensors)
-        out_queue = self.queues["out"]                     # Output to main
+        in_queue = self.queues["data_symbolic"]
+        out_queue = self.queues["out"]
+        neural_queue = self.queues.get("data_neural", None)
         debug_queue = self.queues.get("debug", None)       # Optional debug
 
-        TIME = self.config.get("TIME", False)
+        use_neural = self.config.get("USE_NEURAL", True)
 
         session_idx = 0
         while not self.stop_event.is_set():
@@ -51,15 +52,19 @@ class SymbolicWorker(BaseWorker):
             session_idx += 1
             try:
                 # One step inference (returns CPU-safe dict)
-                if TIME:
-                    with utils.Timer(f"{self.name} Inference"):
-                        pkg_cpu = self.runtime.step(raw_csi_block)
-                else:
-                    pkg_cpu = self.runtime.step(raw_csi_block)
+                pkg_cpu = self.runtime.step(raw_csi_block)
 
                 # Always send main output
                 out_queue.put(pkg_cpu)
                 print(f"[{self.name}] Save #{session_idx} prediction trajectory!")
+
+                if use_neural and neural_queue is not None:
+                    neural_pkg = {
+                        "aggregated_csi": pkg_cpu["aggregated_csi"],
+                        "emission_log_probs_qgt": pkg_cpu["emission_log_probs_qgt"],
+                        "posterior_gt": pkg_cpu["posterior_gt"],
+                    }
+                    neural_queue.put(neural_pkg)
 
                 # Optional debug (non-blocking)
                 if debug_queue is not None:

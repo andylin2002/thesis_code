@@ -24,20 +24,24 @@ class ProposedProcessor:
         self.num_ap = len(self.ap_data)
         self.num_sample = config['NUM_SAMPLE']
 
+        self.aggregated_csi: Optional[torch.Tensor] = None
+
     def process(self, raw_csi_data: torch.Tensor) -> Optional[torch.Tensor]:
         """
         Process batch data.
         """
         # --- Data Preprocessing ---
-        processed_csi = run_csi_aggregation(
+        aggregated_csi = run_csi_aggregation(
             raw_csi_data=raw_csi_data,
             config=self.config
         )
 
+        self.aggregated_csi = aggregated_csi
+
         # Prepare Batch
         num_batch = self.num_ap * self.num_sample
         # (QT, N, M) - Ensure reshape logic aligns with data structure
-        batch_input_csi = processed_csi.reshape(num_batch, *processed_csi.shape[2:]).contiguous()
+        batch_input_csi = aggregated_csi.reshape(num_batch, *aggregated_csi.shape[2:]).contiguous()
 
         # --- Feature Extraction ---
         aoa_all_paths, tof_all_paths, gain_all_paths = self.mmp_engine.estimate_aoa_tof_batch(
@@ -67,7 +71,7 @@ class ProposedProcessor:
         # [Q, T, C, 5]
         features = features_stacked_flat.reshape(self.num_ap, self.num_sample, C, 5)
 
-        DEBUG = True
+        DEBUG = False
         if DEBUG:
             self._save_debug_info(features)
 

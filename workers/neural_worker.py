@@ -43,15 +43,15 @@ class NeuralWorker(BaseWorker):
         os.makedirs(self.ckpt_dir, exist_ok=True)
         
         # Hyperparameters from config
-        TIME_LOG = self.config.get("TIME", False)
-        SAVE_INTERVAL = self.config.get("NEURAL_SAVE_INTERVAL", 50)
-        NEURAL_SLEEP = self.config.get("NEURAL_SLEEP", 0.05)
+        save_interval = self.config.get("NEURAL_SAVE_INTERVAL", 50)
+        neural_sleep = self.config.get("NEURAL_SLEEP", 0.05)
         
         while not self.stop_event.is_set():
+            neural_pkg = None
             try:
                 try:
                     # 1. Fetch exactly ONE fresh CSI packet
-                    raw_csi_cpu = in_queue.get(timeout=0.1)
+                    neural_pkg = in_queue.get(timeout=0.1)
                 except Empty:
                     continue
 
@@ -59,11 +59,7 @@ class NeuralWorker(BaseWorker):
                     raise RuntimeError("Runtime not initialized")
 
                 # 2. Push packet to runtime exactly ONCE (No NUM_EPOCHS loop)
-                if TIME_LOG:
-                    with utils.Timer(f"{self.name} Step"):
-                        metrics_pkg = self.runtime.run_step(raw_csi_cpu)
-                else:
-                    metrics_pkg = self.runtime.run_step(raw_csi_cpu)
+                metrics_pkg = self.runtime.run_step(neural_pkg)
 
                 # 3. Process results ONLY if a full batch was trained
                 if metrics_pkg is not None:
@@ -93,17 +89,20 @@ class NeuralWorker(BaseWorker):
                             print(f"[{self.name}] Sync failed: {e}")
 
                     # Auto-save logic
-                    if current_step > 0 and current_step % SAVE_INTERVAL == 0:
+                    if current_step > 0 and current_step % save_interval == 0:
                         self.runtime.save_checkpoint(self.ckpt_path)
                         print(f"[{self.name}] Checkpoint saved to {self.ckpt_path}")
                 
                 # Sleep to yield CPU back to OS/other workers
-                time.sleep(NEURAL_SLEEP)
-                in_queue.task_done()
+                time.sleep(neural_sleep)
 
             except Exception as e:
                 print(f"[{self.name}] Error: {e}")
                 traceback.print_exc()
+
+            finally:
+                if neural_pkg is not None:
+                    in_queue.task_done()
 
         # Final save upon shutdown
         if self.runtime:
