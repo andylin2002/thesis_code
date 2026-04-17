@@ -15,6 +15,8 @@ from engines.neural_engine.stages.train import TrainStage
 
 
 class NeuralRuntime:
+    """Coordinate online long-horizon proxy learning."""
+
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.config = config
         self.device = device
@@ -25,29 +27,25 @@ class NeuralRuntime:
         self.train: Optional[TrainStage] = None
 
         self.steps = 0
+        self.num_updates = 0
 
-        # replay control
-        self.replay_updates_per_step = int(config.get("NEURAL_REPLAY_UPDATES_PER_STEP", 2))
-        self.replay_batch_size = int(config.get("NEURAL_REPLAY_BATCH_SIZE", 16))
-
-        # publish control
         self.update_interval = int(config.get("NEURAL_UPDATE_INTERVAL", 10))
         self.min_updates_before_publish = int(config.get("NEURAL_MIN_UPDATES", 50))
 
-        # simple gate to avoid collapsed model
-        self.min_rel_std = float(config.get("NEURAL_MIN_REL_STD", 0.05))
-        self.min_rel_gap = float(config.get("NEURAL_MIN_REL_GAP", 0.02))
-
-        # debug
-        self.save_debug = bool(config.get("SAVE_NEURAL_DEBUG", True))
+        self.save_debug = bool(config.get("SAVE_NEURAL_DEBUG", False))
         self.debug_dir = str(config.get("NEURAL_DEBUG_DIR", "output/neural_debug"))
-        self.debug_save_interval = int(config.get("NEURAL_DEBUG_SAVE_INTERVAL", 1))
+        self.debug_save_interval = int(config.get("NEURAL_DEBUG_SAVE_INTERVAL", 50))
+        self.updates_per_batch = int(config.get("NEURAL_UPDATES_PER_BATCH", 1))
+
+        self.neighbor_index_matrix: Optional[torch.Tensor] = None
 
     def setup(self) -> None:
         self.load = LoadStage(self.config, self.device)
         self.repr = RepresentStage(self.config, self.device)
         self.proxy = ProxyStage(self.config, self.device)
         self.train = TrainStage(self.config, self.device)
+
+        self.neighbor_index_matrix = self._load_neighbor_index_matrix()
 
         if self.save_debug:
             os.makedirs(self.debug_dir, exist_ok=True)
@@ -62,96 +60,142 @@ class NeuralRuntime:
         if self.load is None or self.repr is None or self.proxy is None or self.train is None:
             raise RuntimeError("Call setup() first.")
 
-        # --------------------------------------------------
-        # 1. append new sample into replay buffer
-        # --------------------------------------------------
+        if self.neighbor_index_matrix is None:
+            raise RuntimeError("neighbor_index_matrix is not initialized")
+
+        self.steps += 1
         self.load.append(neural_pkg)
 
         if not self.load.ready():
             return None
 
-        # --------------------------------------------------
-        # 2. train with replay (multiple updates)
-        # --------------------------------------------------
-        last_metrics = None
+        batch_pkg = self.load.get_window()
+        if batch_pkg is None:
+            return None
 
-        for _ in range(self.replay_updates_per_step):
-            batch_pkg = self.load.sample_batch(batch_size=self.replay_batch_size)
-            if batch_pkg is None:
-                continue
+        aggregated_csi_swqtnm = batch_pkg["aggregated_csi"]                    # [S,W,Q,T,N,M]
+        emission_swqgt = batch_pkg["emission_log_probs_qgt"]                   # [S,W,Q,G,T]
 
-            aggregated_csi = batch_pkg["aggregated_csi"].to(self.device, non_blocking=True)
-            emission = batch_pkg["emission_log_probs_qgt"].to(self.device, non_blocking=True)
-            posterior = batch_pkg["posterior_gt"].to(self.device, non_blocking=True)
+        aggregated_csi_swqtnm = aggregated_csi_swqtnm.to(self.device, non_blocking=True)
+        emission_swqgt = emission_swqgt.to(self.device, non_blocking=True)
 
-            pattern = self.repr.process(aggregated_csi)
+        s, w, q, t, n, m = aggregated_csi_swqtnm.shape
+        s2, w2, q2, g, t2 = emission_swqgt.shape
 
-            proxy_pkg = self.proxy.build(
-                emission_log_probs_qgt=emission,
-                posterior_gt=posterior,
+        if s != s2 or w != w2 or q != q2 or t != t2:
+            raise ValueError(
+                "Shape mismatch between aggregated_csi and emission_log_probs_qgt: "
+                f"aggregated_csi={tuple(aggregated_csi_swqtnm.shape)}, "
+                f"emission={tuple(emission_swqgt.shape)}"
             )
 
-            last_metrics = self.train.step(
-                pattern=pattern,
-                target_score=proxy_pkg["expected_logprob"],
-            )
+        aggregated_csi_bqtnm = aggregated_csi_swqtnm.reshape(s * w, q, t, n, m)
+        pattern_bqtcm = self.repr.process(aggregated_csi_bqtnm)                # [S*W,Q,T,C,M]
 
-        self.steps += 1
+        c = pattern_bqtcm.shape[3]
+        pattern_swqtcm = pattern_bqtcm.reshape(s, w, q, t, c, m)               # [S,W,Q,T,C,M]
 
-        # --------------------------------------------------
-        # 3. debug saving
-        # --------------------------------------------------
-        if self.save_debug and (self.steps % self.debug_save_interval == 0):
-            self._save_debug_tensors()
-
-        # --------------------------------------------------
-        # 4. publish decision (with simple gate)
-        # --------------------------------------------------
-        should_publish = (
-            (self.steps >= self.min_updates_before_publish)
-            and (self.steps % self.update_interval == 0)
+        proxy_pkg = self.proxy.build(
+            emission_log_probs_qgt=emission_swqgt,
+            neighbor_index_matrix=self.neighbor_index_matrix,
         )
 
-        if should_publish and last_metrics is not None:
-            rel_std = last_metrics.get("pred_std", 0.0)
-            rel_gap = last_metrics.get("top1_top2_gap", 0.0)
+        target_score_swqt = proxy_pkg["target_score"]                          # [S,W,Q,T]
+        pattern_bqtcm = pattern_swqtcm.reshape(s * w, q, t, c, m)             # [S*W,Q,T,C,M]
+        target_score_bqt = target_score_swqt.reshape(s * w, q, t)             # [S*W,Q,T]
 
-            # avoid collapsed reliability
-            if rel_std > self.min_rel_std and rel_gap > self.min_rel_gap:
-                return {
-                    "type": "model_update",
-                    "step": self.steps,
-                    "state_dict": self.train.get_state_dict(),
-                    "metrics": last_metrics,
-                }
+        metrics = None
+        for _ in range(self.updates_per_batch):
+            metrics = self.train.step(
+                pattern=pattern_bqtcm,
+                target_score=target_score_bqt,
+            )
+
+        self.num_updates += 1
+
+        if self.save_debug and (self.num_updates % self.debug_save_interval == 0):
+            self._save_debug_tensors(
+                pattern=pattern_bqtcm,
+                target_score=target_score_bqt,
+                pred_logits=self.train.get_debug_tensors().get("pred_logits"),
+                num_windows=s,
+                window_size=w,
+            )
+
+        should_publish = (
+            self.num_updates >= self.min_updates_before_publish
+            and self.num_updates % self.update_interval == 0
+        )
+
+        if should_publish:
+            return {
+                "type": "model_update",
+                "step": self.steps,
+                "num_updates": self.num_updates,
+                "state_dict": self.train.get_state_dict(),
+                "metrics": metrics,
+            }
 
         return {
             "type": "training_step",
             "step": self.steps,
-            "metrics": last_metrics,
+            "num_updates": self.num_updates,
+            "metrics": metrics,
         }
 
-    def _save_debug_tensors(self) -> None:
-        if self.train is None:
-            return
+    def _load_neighbor_index_matrix(self) -> torch.Tensor:
+        output_dir = str(self.config.get("OUTPUT_DIR", "output"))
+        neighbor_path = os.path.join(output_dir, "neighbor_matrix.npy")
 
-        debug_tensors = self.train.get_debug_tensors()
-        if not debug_tensors:
-            return
+        if not os.path.exists(neighbor_path):
+            raise FileNotFoundError(f"neighbor_matrix.npy not found: {neighbor_path}")
 
-        step_dir = os.path.join(self.debug_dir, f"step_{self.steps:06d}")
+        neighbor = np.load(neighbor_path)
+        if neighbor.ndim != 2:
+            raise ValueError(
+                f"Expected neighbor_matrix with shape [G,K], got {tuple(neighbor.shape)}"
+            )
+
+        return torch.from_numpy(neighbor.astype(np.int64)).to(self.device)
+
+    def _save_debug_tensors(
+        self,
+        pattern: torch.Tensor,
+        target_score: torch.Tensor,
+        pred_logits: Optional[torch.Tensor],
+        num_windows: int,
+        window_size: int,
+    ) -> None:
+        step_dir = os.path.join(self.debug_dir, f"step_{self.num_updates:06d}")
         os.makedirs(step_dir, exist_ok=True)
 
-        for name, tensor in debug_tensors.items():
-            if tensor is None:
-                continue
+        np.save(
+            os.path.join(step_dir, "target_score_bqt.npy"),
+            target_score.detach().cpu().numpy(),
+        )
 
-            if isinstance(tensor, torch.Tensor):
-                array = tensor.detach().cpu().numpy()
-            else:
-                array = np.asarray(tensor)
+        if pred_logits is not None:
+            np.save(
+                os.path.join(step_dir, "pred_logits_btq.npy"),
+                pred_logits.detach().cpu().numpy(),
+            )
 
-            np.save(os.path.join(step_dir, f"{name}.npy"), array)
+        pattern_mean = pattern.detach().mean(dim=(-1, -2)).cpu().numpy()
+        np.save(
+            os.path.join(step_dir, "pattern_mean_bqt.npy"),
+            pattern_mean,
+        )
+
+        meta = {
+            "num_windows": num_windows,
+            "window_size": window_size,
+            "num_block_samples": int(target_score.shape[0]),
+        }
+        np.save(
+            os.path.join(step_dir, "meta.npy"),
+            meta,
+            allow_pickle=True,
+        )
 
     def save_checkpoint(self, filepath: str) -> None:
         if self.train is None:
@@ -161,6 +205,7 @@ class NeuralRuntime:
             "state_dict": self.train.get_state_dict(),
             "optimizer_state": self.train.optimizer.state_dict(),
             "step": self.steps,
+            "num_updates": self.num_updates,
             "config": self.config,
         }
         torch.save(checkpoint, filepath)
@@ -179,9 +224,10 @@ class NeuralRuntime:
             state_dict = checkpoint["state_dict"]
             self.train.model.load_state_dict(state_dict["model"])
             self.train.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            self.steps = checkpoint.get("step", 0)
+            self.steps = int(checkpoint.get("step", 0))
+            self.num_updates = int(checkpoint.get("num_updates", 0))
 
-            print(f"[NeuralRuntime] Resumed from step {self.steps}")
+            print(f"[NeuralRuntime] Resumed from step {self.steps}, updates {self.num_updates}")
             return True
 
         except Exception as e:

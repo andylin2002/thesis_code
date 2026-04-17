@@ -1,143 +1,229 @@
 # engines/neural_engine/stages/load.py
 
-import random
-from typing import Dict, List, Optional
+from __future__ import annotations
+
+from collections import deque
+from typing import Deque, Dict, List, Optional
 
 import torch
 
 
 class LoadStage:
-    """Store teacher-labeled samples and serve replay batches."""
+    """Collect new blocks and build sliding window batches for neural training."""
 
     def __init__(self, config: Dict, device: torch.device):
         self.device = device
 
-        self.batch_size = int(config.get("NEURAL_BATCH_SIZE", 16))
-        self.buffer_capacity = int(config.get("NEURAL_REPLAY_BUFFER_SIZE", 512))
-        self.min_buffer_size = int(
-            config.get("NEURAL_MIN_BUFFER_SIZE", self.batch_size)
+        self.B = int(config.get("NEURAL_BATCH_SIZE", 32))
+        self.W = int(config.get("NEURAL_WINDOW_SIZE", 16))
+        self.buffer_capacity = int(
+            config.get("NEURAL_SEQUENCE_BUFFER_CAPACITY", max(self.B * 4, self.W * 4))
         )
-        self.include_latest = bool(config.get("NEURAL_INCLUDE_LATEST", True))
 
-        self.buffer: List[Dict[str, torch.Tensor]] = []
+        if self.B <= 0:
+            raise ValueError("NEURAL_BATCH_SIZE must be > 0")
+        if self.W <= 0:
+            raise ValueError("NEURAL_WINDOW_SIZE must be > 0")
+        if self.W > self.B:
+            raise ValueError("NEURAL_WINDOW_SIZE must be <= NEURAL_BATCH_SIZE")
+        if self.buffer_capacity < self.B:
+            raise ValueError("NEURAL_SEQUENCE_BUFFER_CAPACITY must be >= NEURAL_BATCH_SIZE")
+
+        self.pending_new_blocks: Deque[Dict[str, Optional[torch.Tensor]]] = deque(maxlen=self.B)
+        self.history_tail_blocks: Deque[Dict[str, Optional[torch.Tensor]]] = deque(maxlen=max(self.W - 1, 0))
+
+        self.num_total_blocks = 0
+        self.num_emitted_batches = 0
+
+    def append(self, neural_pkg: Dict[str, torch.Tensor]) -> int:
+        self._validate_pkg(neural_pkg)
+        self.pending_new_blocks.append(self._clone_to_cpu(neural_pkg))
+        self.num_total_blocks += 1
+        return len(self.pending_new_blocks)
+
+    def ready(self) -> bool:
+        return len(self.pending_new_blocks) == self.B
+
+    def size(self) -> int:
+        return len(self.pending_new_blocks)
+
+    def get_window(self) -> Optional[Dict[str, Optional[torch.Tensor]]]:
+        if not self.ready():
+            return None
+
+        new_blocks = list(self.pending_new_blocks)
+        tail_blocks = list(self.history_tail_blocks)
+
+        sequence_blocks = tail_blocks + new_blocks
+        num_sequence_blocks = len(sequence_blocks)
+
+        if num_sequence_blocks < self.W:
+            raise RuntimeError(
+                f"Not enough blocks to build one window: sequence={num_sequence_blocks}, W={self.W}"
+            )
+
+        num_windows = num_sequence_blocks - self.W + 1
+
+        windows_aggregated_csi: List[torch.Tensor] = []
+        windows_emission_log_probs_qgt: List[torch.Tensor] = []
+        windows_posterior_gt: List[torch.Tensor] = []
+
+        has_full_posterior = all(block["posterior_gt"] is not None for block in sequence_blocks)
+
+        for start in range(num_windows):
+            window_blocks = sequence_blocks[start:start + self.W]
+
+            aggregated_csi = torch.stack(
+                [block["aggregated_csi"] for block in window_blocks],
+                dim=0,
+            )  # [W,Q,T,N,M]
+
+            emission_log_probs_qgt = torch.stack(
+                [block["emission_log_probs_qgt"] for block in window_blocks],
+                dim=0,
+            )  # [W,Q,G,T]
+
+            windows_aggregated_csi.append(aggregated_csi)
+            windows_emission_log_probs_qgt.append(emission_log_probs_qgt)
+
+            if has_full_posterior:
+                posterior_gt = torch.stack(
+                    [block["posterior_gt"] for block in window_blocks],
+                    dim=0,
+                )  # [W,G,T]
+                windows_posterior_gt.append(posterior_gt)
+
+        batch_aggregated_csi = torch.stack(
+            windows_aggregated_csi,
+            dim=0,
+        )  # [S,W,Q,T,N,M]
+
+        batch_emission_log_probs_qgt = torch.stack(
+            windows_emission_log_probs_qgt,
+            dim=0,
+        )  # [S,W,Q,G,T]
+
+        if has_full_posterior:
+            batch_posterior_gt = torch.stack(
+                windows_posterior_gt,
+                dim=0,
+            )  # [S,W,G,T]
+        else:
+            batch_posterior_gt = None
+
+        self._update_history_tail(new_blocks)
+        self.pending_new_blocks.clear()
+        self.num_emitted_batches += 1
+
+        return {
+            "aggregated_csi": batch_aggregated_csi,
+            "emission_log_probs_qgt": batch_emission_log_probs_qgt,
+            "posterior_gt": batch_posterior_gt,
+            "num_windows": batch_aggregated_csi.shape[0],
+            "window_size": self.W,
+            "batch_size": self.B,
+        }
+
+    def state_dict(self) -> Dict[str, int]:
+        return {
+            "pending_new_blocks": len(self.pending_new_blocks),
+            "history_tail_blocks": len(self.history_tail_blocks),
+            "num_total_blocks": self.num_total_blocks,
+            "num_emitted_batches": self.num_emitted_batches,
+            "batch_size_B": self.B,
+            "window_size_W": self.W,
+            "buffer_capacity": self.buffer_capacity,
+        }
+
+    def _update_history_tail(
+        self,
+        new_blocks: List[Dict[str, Optional[torch.Tensor]]],
+    ) -> None:
+        self.history_tail_blocks.clear()
+
+        if self.W <= 1:
+            return
+
+        tail_length = self.W - 1
+        tail_blocks = new_blocks[-tail_length:]
+
+        for block in tail_blocks:
+            self.history_tail_blocks.append(block)
 
     def _validate_pkg(self, neural_pkg: Dict[str, torch.Tensor]) -> None:
         if not isinstance(neural_pkg, dict):
-            raise ValueError("neural_pkg must be a dict")
+            raise TypeError("neural_pkg must be a dict")
 
-        required_keys = ["aggregated_csi", "emission_log_probs_qgt", "posterior_gt"]
+        required_keys = ["aggregated_csi", "emission_log_probs_qgt"]
         for key in required_keys:
             if key not in neural_pkg:
                 raise KeyError(f"Missing key in neural_pkg: {key}")
 
-        if not isinstance(neural_pkg["aggregated_csi"], torch.Tensor):
+        aggregated_csi = neural_pkg["aggregated_csi"]
+        emission_log_probs_qgt = neural_pkg["emission_log_probs_qgt"]
+        posterior_gt = neural_pkg.get("posterior_gt", None)
+
+        if not isinstance(aggregated_csi, torch.Tensor):
             raise TypeError("aggregated_csi must be a torch.Tensor")
-        if not isinstance(neural_pkg["emission_log_probs_qgt"], torch.Tensor):
+        if not isinstance(emission_log_probs_qgt, torch.Tensor):
             raise TypeError("emission_log_probs_qgt must be a torch.Tensor")
-        if not isinstance(neural_pkg["posterior_gt"], torch.Tensor):
-            raise TypeError("posterior_gt must be a torch.Tensor")
+        if posterior_gt is not None and not isinstance(posterior_gt, torch.Tensor):
+            raise TypeError("posterior_gt must be a torch.Tensor or None")
 
-    def _clone_to_cpu(self, neural_pkg: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        return {
-            "aggregated_csi": neural_pkg["aggregated_csi"].detach().cpu().clone(),
-            "emission_log_probs_qgt": neural_pkg["emission_log_probs_qgt"].detach().cpu().clone(),
-            "posterior_gt": neural_pkg["posterior_gt"].detach().cpu().clone(),
-        }
+        if aggregated_csi.ndim != 4:
+            raise ValueError(
+                f"Expected aggregated_csi shape [Q,T,N,M], got {tuple(aggregated_csi.shape)}"
+            )
 
-    def _stack_indices(self, indices: List[int]) -> Dict[str, torch.Tensor]:
-        return {
-            "aggregated_csi": torch.stack(
-                [self.buffer[i]["aggregated_csi"] for i in indices], dim=0
-            ),
-            "emission_log_probs_qgt": torch.stack(
-                [self.buffer[i]["emission_log_probs_qgt"] for i in indices], dim=0
-            ),
-            "posterior_gt": torch.stack(
-                [self.buffer[i]["posterior_gt"] for i in indices], dim=0
-            ),
-        }
+        if emission_log_probs_qgt.ndim != 3:
+            raise ValueError(
+                f"Expected emission_log_probs_qgt shape [Q,G,T], got {tuple(emission_log_probs_qgt.shape)}"
+            )
 
-    def append(self, neural_pkg: Dict[str, torch.Tensor]) -> int:
-        self._validate_pkg(neural_pkg)
-        item = self._clone_to_cpu(neural_pkg)
+        if posterior_gt is not None and posterior_gt.ndim != 2:
+            raise ValueError(
+                f"Expected posterior_gt shape [G,T], got {tuple(posterior_gt.shape)}"
+            )
 
-        self.buffer.append(item)
+        q_csi, t_csi, _, _ = aggregated_csi.shape
+        q_epd, g_epd, t_epd = emission_log_probs_qgt.shape
 
-        if self.buffer_capacity > 0 and len(self.buffer) > self.buffer_capacity:
-            overflow = len(self.buffer) - self.buffer_capacity
-            self.buffer = self.buffer[overflow:]
+        if q_csi != q_epd:
+            raise ValueError(
+                f"AP dimension mismatch: aggregated_csi Q={q_csi}, emission Q={q_epd}"
+            )
 
-        return len(self.buffer)
+        if t_csi != t_epd:
+            raise ValueError(
+                f"Time dimension mismatch: aggregated_csi T={t_csi}, emission T={t_epd}"
+            )
 
-    def ready(self, min_size: Optional[int] = None) -> bool:
-        required = self.min_buffer_size if min_size is None else int(min_size)
-        return len(self.buffer) >= required
+        if posterior_gt is not None:
+            g_post, t_post = posterior_gt.shape
 
-    def size(self) -> int:
-        return len(self.buffer)
+            if g_post != g_epd:
+                raise ValueError(
+                    f"Grid dimension mismatch: emission G={g_epd}, posterior G={g_post}"
+                )
 
-    def sample_batch(
+            if t_post != t_epd:
+                raise ValueError(
+                    f"Time dimension mismatch: emission T={t_epd}, posterior T={t_post}"
+                )
+
+    def _clone_to_cpu(
         self,
-        batch_size: Optional[int] = None,
-        include_latest: Optional[bool] = None,
-    ) -> Optional[Dict[str, torch.Tensor]]:
-        if not self.buffer:
-            return None
+        neural_pkg: Dict[str, torch.Tensor],
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        aggregated_csi = neural_pkg["aggregated_csi"].detach().cpu().clone()
+        emission_log_probs_qgt = neural_pkg["emission_log_probs_qgt"].detach().cpu().clone()
 
-        batch_n = self.batch_size if batch_size is None else int(batch_size)
-        use_latest = self.include_latest if include_latest is None else bool(include_latest)
+        posterior_gt = neural_pkg.get("posterior_gt", None)
+        if posterior_gt is not None:
+            posterior_gt = posterior_gt.detach().cpu().clone()
 
-        if len(self.buffer) < batch_n:
-            return None
-
-        latest_idx = len(self.buffer) - 1
-        all_indices = list(range(len(self.buffer)))
-
-        if use_latest:
-            candidate_indices = all_indices[:-1]
-            sample_n = batch_n - 1
-
-            if sample_n < 0:
-                raise ValueError("batch_size must be >= 1")
-
-            if sample_n == 0:
-                chosen = [latest_idx]
-            else:
-                chosen = random.sample(candidate_indices, k=sample_n)
-                chosen.append(latest_idx)
-        else:
-            chosen = random.sample(all_indices, k=batch_n)
-
-        return self._stack_indices(chosen)
-
-    def sample_recent_batch(
-        self,
-        batch_size: Optional[int] = None,
-    ) -> Optional[Dict[str, torch.Tensor]]:
-        batch_n = self.batch_size if batch_size is None else int(batch_size)
-        if len(self.buffer) < batch_n:
-            return None
-
-        start = len(self.buffer) - batch_n
-        indices = list(range(start, len(self.buffer)))
-        return self._stack_indices(indices)
-
-    def accumulate(self, neural_pkg: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:
-        """
-        Backward-compatible entry point.
-        Append new sample, then return one replay batch if buffer is ready.
-        """
-        self.append(neural_pkg)
-
-        if not self.ready():
-            return None
-
-        return self.sample_batch()
-
-    def state_dict(self) -> Dict[str, int]:
         return {
-            "buffer_size": len(self.buffer),
-            "batch_size": self.batch_size,
-            "buffer_capacity": self.buffer_capacity,
-            "min_buffer_size": self.min_buffer_size,
+            "aggregated_csi": aggregated_csi,
+            "emission_log_probs_qgt": emission_log_probs_qgt,
+            "posterior_gt": posterior_gt,
         }
