@@ -16,6 +16,7 @@ class LoadStage:
 
         self.B = int(config.get("NEURAL_BATCH_SIZE", 32))
         self.W = int(config.get("NEURAL_WINDOW_SIZE", 16))
+        self.window_stride = int(config.get("NEURAL_WINDOW_STRIDE", 1))
         self.buffer_capacity = int(
             config.get("NEURAL_SEQUENCE_BUFFER_CAPACITY", max(self.B * 4, self.W * 4))
         )
@@ -26,6 +27,10 @@ class LoadStage:
             raise ValueError("NEURAL_WINDOW_SIZE must be > 0")
         if self.W > self.B:
             raise ValueError("NEURAL_WINDOW_SIZE must be <= NEURAL_BATCH_SIZE")
+        if self.window_stride <= 0:
+            raise ValueError("NEURAL_WINDOW_STRIDE must be > 0")
+        if self.window_stride > self.W:
+            raise ValueError("NEURAL_WINDOW_STRIDE must be <= NEURAL_WINDOW_SIZE")
         if self.buffer_capacity < self.B:
             raise ValueError("NEURAL_SEQUENCE_BUFFER_CAPACITY must be >= NEURAL_BATCH_SIZE")
 
@@ -62,7 +67,7 @@ class LoadStage:
                 f"Not enough blocks to build one window: sequence={num_sequence_blocks}, W={self.W}"
             )
 
-        num_windows = num_sequence_blocks - self.W + 1
+        start_indices = list(range(0, num_sequence_blocks - self.W + 1, self.window_stride))
 
         windows_aggregated_csi: List[torch.Tensor] = []
         windows_emission_log_probs_qgt: List[torch.Tensor] = []
@@ -70,7 +75,7 @@ class LoadStage:
 
         has_full_posterior = all(block["posterior_gt"] is not None for block in sequence_blocks)
 
-        for start in range(num_windows):
+        for start in start_indices:
             window_blocks = sequence_blocks[start:start + self.W]
 
             aggregated_csi = torch.stack(
@@ -132,6 +137,7 @@ class LoadStage:
             "num_emitted_batches": self.num_emitted_batches,
             "batch_size_B": self.B,
             "window_size_W": self.W,
+            "window_stride": self.window_stride,
             "buffer_capacity": self.buffer_capacity,
         }
 

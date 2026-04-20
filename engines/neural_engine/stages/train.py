@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from core.models.reliability_model import NeuralReliabilityModel
+from core.models.model import NeuralReliabilityModel
 
 
 class TrainStage:
-    """Train neural model to predict long-horizon AP score."""
+    """Train neural reliability model with KL loss to proxy teacher only."""
 
     def __init__(
         self,
@@ -26,11 +26,10 @@ class TrainStage:
         self.weight_decay = float(config.get("WEIGHT_DECAY", 0.0))
         self.grad_clip_norm = float(config.get("GRAD_CLIP_NORM", 1.0))
 
-        self.loss_weight_score = float(config.get("LOSS_WEIGHT_SCORE", 1.0))
-        self.loss_weight_smooth = float(config.get("LOSS_WEIGHT_SMOOTH", 0.0))
-
-        self.score_loss_type = str(config.get("SCORE_LOSS_TYPE", "huber")).lower()
-        self.huber_beta = float(config.get("HUBER_BETA", 1.0))
+        self.teacher_temperature = float(config.get("TEACHER_TEMPERATURE", 1.0))
+        self.student_temperature = float(config.get("STUDENT_TEMPERATURE", 1.0))
+        self.teacher_std_floor = float(config.get("TEACHER_STD_FLOOR", 1e-4))
+        self.eps = 1e-8
 
         self.model = NeuralReliabilityModel(config).to(self.device)
         self.optimizer = optim.AdamW(
@@ -48,35 +47,44 @@ class TrainStage:
             )
         return target_score.permute(0, 2, 1).contiguous()
 
-    def _target_centered_btq(self, target_score: torch.Tensor) -> torch.Tensor:
+    def _build_teacher_logits_btq(self, target_score: torch.Tensor) -> torch.Tensor:
         target_btq = self._target_btq(target_score)
-        return target_btq - target_btq.mean(dim=-1, keepdim=True)
+        target_btq = target_btq - target_btq.mean(dim=-1, keepdim=True)
 
-    def _compute_score_loss(
+        std = target_btq.std(dim=-1, keepdim=True).clamp_min(self.teacher_std_floor)
+        target_btq = target_btq / std
+
+        return target_btq
+
+    def _build_teacher_prob_btq(
+        self,
+        target_score: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        teacher_logits = self._build_teacher_logits_btq(target_score)
+        teacher_prob = torch.softmax(
+            teacher_logits / self.teacher_temperature,
+            dim=-1,
+        )
+        return teacher_logits, teacher_prob
+
+    def _build_student_log_prob_btq(self, pred_logits: torch.Tensor) -> torch.Tensor:
+        return F.log_softmax(pred_logits / self.student_temperature, dim=-1)
+
+    def _compute_proxy_loss(
         self,
         pred_logits: torch.Tensor,
         target_score: torch.Tensor,
-    ) -> torch.Tensor:
-        target_centered_btq = self._target_centered_btq(target_score)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        teacher_logits, teacher_prob = self._build_teacher_prob_btq(target_score)
+        student_log_prob = self._build_student_log_prob_btq(pred_logits)
 
-        if self.score_loss_type == "mse":
-            return F.mse_loss(pred_logits, target_centered_btq)
-
-        if self.score_loss_type == "huber":
-            return F.smooth_l1_loss(
-                pred_logits,
-                target_centered_btq,
-                beta=self.huber_beta,
-            )
-
-        raise ValueError(f"Unsupported SCORE_LOSS_TYPE: {self.score_loss_type}")
-
-    def _compute_smoothness_loss(self, pred_logits: torch.Tensor) -> torch.Tensor:
-        if pred_logits.shape[1] < 2:
-            return torch.zeros((), device=pred_logits.device, dtype=pred_logits.dtype)
-
-        diff = pred_logits[:, 1:, :] - pred_logits[:, :-1, :]
-        return (diff ** 2).mean()
+        loss = F.kl_div(
+            student_log_prob,
+            teacher_prob,
+            reduction="batchmean",
+            log_target=False,
+        )
+        return loss, teacher_logits, teacher_prob
 
     def _mean_spearman(
         self,
@@ -90,11 +98,8 @@ class TrainStage:
                 px = pred_btq[b, t]
                 tx = target_btq[b, t]
 
-                px_rank = torch.argsort(torch.argsort(px))
-                tx_rank = torch.argsort(torch.argsort(tx))
-
-                px_rank = px_rank.float()
-                tx_rank = tx_rank.float()
+                px_rank = torch.argsort(torch.argsort(px)).float()
+                tx_rank = torch.argsort(torch.argsort(tx)).float()
 
                 px_rank = px_rank - px_rank.mean()
                 tx_rank = tx_rank - tx_rank.mean()
@@ -120,22 +125,35 @@ class TrainStage:
         target_top1 = target_btq.argmax(dim=-1)
         return float((pred_top1 == target_top1).float().mean().item())
 
+    def _mean_entropy(self, prob_btq: torch.Tensor) -> float:
+        entropy = -(prob_btq.clamp_min(self.eps) * prob_btq.clamp_min(self.eps).log()).sum(dim=-1)
+        return float(entropy.mean().item())
+
+    def _mean_max_prob(self, prob_btq: torch.Tensor) -> float:
+        return float(prob_btq.max(dim=-1).values.mean().item())
+
+    def _top1_top2_gap(self, logits_btq: torch.Tensor) -> float:
+        if logits_btq.shape[-1] < 2:
+            return 0.0
+        top2 = torch.topk(logits_btq, k=2, dim=-1).values
+        return float((top2[..., 0] - top2[..., 1]).mean().item())
+
     def get_debug_tensors(self) -> Dict[str, torch.Tensor]:
         return self.last_debug_tensors
 
     def step(
         self,
         pattern: torch.Tensor,
-        target_score: torch.Tensor,
+        target_score: torch.Tensor
     ) -> Dict[str, float]:
         if pattern.ndim != 5:
             raise ValueError(
-                f"Expected pattern with shape [B,Q,T,C,M], got {tuple(pattern.shape)}"
+                f"Expected pattern shape [B,Q,T,C,M], got {tuple(pattern.shape)}"
             )
 
         if target_score.ndim != 3:
             raise ValueError(
-                f"Expected target_score with shape [B,Q,T], got {tuple(target_score.shape)}"
+                f"Expected target_score shape [B,Q,T], got {tuple(target_score.shape)}"
             )
 
         if pattern.device != self.device:
@@ -145,15 +163,18 @@ class TrainStage:
             target_score = target_score.to(self.device, non_blocking=True)
 
         self.model.train()
-        _, pred_logits = self.model(pattern, return_logits=True)
-
-        score_loss = self._compute_score_loss(pred_logits, target_score)
-        smoothness_loss = self._compute_smoothness_loss(pred_logits)
-
-        total_loss = (
-            self.loss_weight_score * score_loss
-            + self.loss_weight_smooth * smoothness_loss
+        _, pred_logits, embedding = self.model(
+            pattern,
+            return_logits=True,
+            return_embedding=True,
         )
+
+        proxy_loss, teacher_logits_btq, teacher_prob_btq = self._compute_proxy_loss(
+            pred_logits,
+            target_score,
+        )
+
+        total_loss = proxy_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -167,32 +188,45 @@ class TrainStage:
         self.optimizer.step()
 
         with torch.no_grad():
-            target_centered_btq = self._target_centered_btq(target_score)
-            pred_centered_btq = pred_logits.detach()
+            pred_logits_btq = pred_logits.detach()
+            pred_prob_btq = torch.softmax(pred_logits_btq, dim=-1)
 
-            pred_std = float(pred_centered_btq.std(dim=-1).mean().item())
+            pred_std = float(pred_logits_btq.std(dim=-1).mean().item())
+            pred_gap = self._top1_top2_gap(pred_logits_btq)
+            teacher_gap = self._top1_top2_gap(teacher_logits_btq)
 
-            if pred_centered_btq.shape[-1] >= 2:
-                top2 = torch.topk(pred_centered_btq, k=2, dim=-1).values
-                top1_top2_gap = float((top2[..., 0] - top2[..., 1]).mean().item())
-            else:
-                top1_top2_gap = 0.0
+            score_spearman = self._mean_spearman(pred_logits_btq, teacher_logits_btq)
+            score_top1_acc = self._top1_acc(pred_prob_btq, teacher_prob_btq)
 
-            score_spearman = self._mean_spearman(pred_centered_btq, target_centered_btq)
-            score_top1_acc = self._top1_acc(pred_centered_btq, target_centered_btq)
+            teacher_entropy = self._mean_entropy(teacher_prob_btq)
+            pred_entropy = self._mean_entropy(pred_prob_btq)
+
+            teacher_max_prob = self._mean_max_prob(teacher_prob_btq)
+            pred_max_prob = self._mean_max_prob(pred_prob_btq)
+
+            emb_norm = float(embedding.norm(dim=-1).mean().item())
 
             self.last_debug_tensors = {
-                "pred_logits": pred_centered_btq.detach().cpu(),
+                "pred_logits": pred_logits_btq.cpu(),
+                "pred_prob": pred_prob_btq.cpu(),
+                "teacher_logits": teacher_logits_btq.cpu(),
+                "teacher_prob": teacher_prob_btq.cpu(),
+                "embedding": embedding.detach().cpu(),
             }
 
         return {
             "loss": float(total_loss.item()),
-            "score_loss": float(score_loss.item()),
-            "smoothness_loss": float(smoothness_loss.item()),
+            "proxy_loss": float(proxy_loss.item()),
             "score_spearman": score_spearman,
             "score_top1_acc": score_top1_acc,
             "pred_std": pred_std,
-            "top1_top2_gap": top1_top2_gap,
+            "top1_top2_gap": pred_gap,
+            "teacher_top1_top2_gap": teacher_gap,
+            "teacher_entropy": teacher_entropy,
+            "pred_entropy": pred_entropy,
+            "teacher_max_prob": teacher_max_prob,
+            "pred_max_prob": pred_max_prob,
+            "embedding_norm": emb_norm,
         }
 
     def get_state_dict(self) -> Dict[str, Any]:

@@ -4,7 +4,7 @@ import torch
 from typing import Any, Dict, Tuple, Union
 
 from engines.neural_engine.stages.represent import RepresentStage
-from core.models.reliability_model import NeuralReliabilityModel
+from core.models.model import NeuralReliabilityModel
 
 
 class GatingEvaluator:
@@ -42,15 +42,13 @@ class GatingEvaluator:
     def evaluate(
         self,
         aggregated_csi_block: torch.Tensor,
-        return_logits: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         """
         Input:
             aggregated_csi_block: [Q, T, N, M]
 
         Output:
             reliability_qt: [Q, T]
-            logits_qt: [Q, T] if return_logits=True
         """
         if not isinstance(aggregated_csi_block, torch.Tensor):
             raise TypeError(
@@ -80,35 +78,24 @@ class GatingEvaluator:
                 f"AI Gating fail: configured num_subcarriers={self.num_subcarriers}, but got {num_subcarriers}"
             )
 
-        aggregated_csi_batch = aggregated_csi_block.unsqueeze(0)  # [1, Q, T, N, M]
-        pattern = self.represent.process(aggregated_csi_batch)    # [1, Q, T, C, M]
+        aggregated_csi_batch = aggregated_csi_block.unsqueeze(0)   # [1,Q,T,N,M]
+        pattern = self.represent.process(aggregated_csi_batch)     # [1,Q,T,C,M]
 
-        if return_logits:
-            reliability_btq, logits_btq = self.model(
-                pattern,
-                return_logits=True,
-            )  # [1, T, Q], [1, T, Q]
-        else:
-            reliability_btq = self.model(
-                pattern,
-                return_logits=False,
-            )  # [1, T, Q]
-            logits_btq = None
+        reliability_btq, logits_btq = self.model(
+            pattern,
+            return_logits=True,
+        )
 
         if reliability_btq.ndim != 3:
             raise RuntimeError(
-                f"AI Gating fail: model must output [B, T, Q], got {tuple(reliability_btq.shape)}"
+                f"AI Gating fail: model must output [B,T,Q], got {tuple(reliability_btq.shape)}"
             )
 
-        reliability_qt = reliability_btq[0].transpose(0, 1).contiguous()  # [Q, T]
+        if logits_btq.ndim != 3:
+            raise RuntimeError(
+                f"AI Gating fail: logits must have shape [B,T,Q], got {tuple(logits_btq.shape)}"
+            )
 
-        if return_logits:
-            if logits_btq is None:
-                raise RuntimeError(
-                    "AI Gating fail: return_logits=True but logits were not produced"
-                )
-
-            logits_qt = logits_btq[0].transpose(0, 1).contiguous()  # [Q, T]
-            return reliability_qt, logits_qt
+        reliability_qt = reliability_btq[0].transpose(0, 1).contiguous()  # [Q,T]
 
         return reliability_qt

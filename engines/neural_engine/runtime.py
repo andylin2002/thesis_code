@@ -15,7 +15,7 @@ from engines.neural_engine.stages.train import TrainStage
 
 
 class NeuralRuntime:
-    """Coordinate online long-horizon proxy learning."""
+    """online long-horizon proxy."""
 
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.config = config
@@ -57,7 +57,12 @@ class NeuralRuntime:
         return self.train.model
 
     def run_step(self, neural_pkg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if self.load is None or self.repr is None or self.proxy is None or self.train is None:
+        if (
+            self.load is None
+            or self.repr is None
+            or self.proxy is None
+            or self.train is None
+        ):
             raise RuntimeError("Call setup() first.")
 
         if self.neighbor_index_matrix is None:
@@ -73,8 +78,8 @@ class NeuralRuntime:
         if batch_pkg is None:
             return None
 
-        aggregated_csi_swqtnm = batch_pkg["aggregated_csi"]                    # [S,W,Q,T,N,M]
-        emission_swqgt = batch_pkg["emission_log_probs_qgt"]                   # [S,W,Q,G,T]
+        aggregated_csi_swqtnm = batch_pkg["aggregated_csi"]          # [S,W,Q,T,N,M]
+        emission_swqgt = batch_pkg["emission_log_probs_qgt"]         # [S,W,Q,G,T]
 
         aggregated_csi_swqtnm = aggregated_csi_swqtnm.to(self.device, non_blocking=True)
         emission_swqgt = emission_swqgt.to(self.device, non_blocking=True)
@@ -90,34 +95,34 @@ class NeuralRuntime:
             )
 
         aggregated_csi_bqtnm = aggregated_csi_swqtnm.reshape(s * w, q, t, n, m)
-        pattern_bqtcm = self.repr.process(aggregated_csi_bqtnm)                # [S*W,Q,T,C,M]
-
-        c = pattern_bqtcm.shape[3]
-        pattern_swqtcm = pattern_bqtcm.reshape(s, w, q, t, c, m)               # [S,W,Q,T,C,M]
+        pattern_bqtcm = self.repr.process(aggregated_csi_bqtnm)      # [S*W,Q,T,C,M]
 
         proxy_pkg = self.proxy.build(
             emission_log_probs_qgt=emission_swqgt,
             neighbor_index_matrix=self.neighbor_index_matrix,
         )
 
-        target_score_swqt = proxy_pkg["target_score"]                          # [S,W,Q,T]
-        pattern_bqtcm = pattern_swqtcm.reshape(s * w, q, t, c, m)             # [S*W,Q,T,C,M]
-        target_score_bqt = target_score_swqt.reshape(s * w, q, t)             # [S*W,Q,T]
+        target_score_swqt = proxy_pkg["target_score"]                # [S,W,Q,T]
+        target_score_bqt = target_score_swqt.reshape(s * w, q, t)   # [S*W,Q,T]
 
         metrics = None
         for _ in range(self.updates_per_batch):
             metrics = self.train.step(
                 pattern=pattern_bqtcm,
-                target_score=target_score_bqt,
+                target_score=target_score_bqt
             )
 
         self.num_updates += 1
 
         if self.save_debug and (self.num_updates % self.debug_save_interval == 0):
+            debug_tensors = self.train.get_debug_tensors()
             self._save_debug_tensors(
                 pattern=pattern_bqtcm,
                 target_score=target_score_bqt,
-                pred_logits=self.train.get_debug_tensors().get("pred_logits"),
+                pred_logits=debug_tensors.get("pred_logits"),
+                pred_prob=debug_tensors.get("pred_prob"),
+                teacher_prob=debug_tensors.get("teacher_prob"),
+                embedding=debug_tensors.get("embedding"),
                 num_windows=s,
                 window_size=w,
             )
@@ -163,6 +168,9 @@ class NeuralRuntime:
         pattern: torch.Tensor,
         target_score: torch.Tensor,
         pred_logits: Optional[torch.Tensor],
+        pred_prob: torch.Tensor,
+        teacher_prob: torch.Tensor,
+        embedding: Optional[torch.Tensor],
         num_windows: int,
         window_size: int,
     ) -> None:
@@ -178,6 +186,24 @@ class NeuralRuntime:
             np.save(
                 os.path.join(step_dir, "pred_logits_btq.npy"),
                 pred_logits.detach().cpu().numpy(),
+            )
+
+        if pred_prob is not None:
+            np.save(
+                os.path.join(step_dir, "pred_prob_btq.npy"),
+                pred_prob.detach().cpu().numpy(),
+            )
+
+        if teacher_prob is not None:
+            np.save(
+                os.path.join(step_dir, "teacher_prob_btq.npy"),
+                teacher_prob.detach().cpu().numpy(),
+            )
+
+        if embedding is not None:
+            np.save(
+                os.path.join(step_dir, "embedding_be.npy"),
+                embedding.detach().cpu().numpy(),
             )
 
         pattern_mean = pattern.detach().mean(dim=(-1, -2)).cpu().numpy()
