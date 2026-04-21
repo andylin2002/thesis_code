@@ -12,7 +12,7 @@ from core.models.model import NeuralReliabilityModel
 
 
 class TrainStage:
-    """Train neural reliability model with KL loss to proxy teacher only."""
+    """Train neural reliability model with richer debug info for train/eval comparison."""
 
     def __init__(
         self,
@@ -39,6 +39,7 @@ class TrainStage:
         )
 
         self.last_debug_tensors: Dict[str, torch.Tensor] = {}
+        self.last_debug_scalars: Dict[str, float] = {}
 
     def _target_btq(self, target_score: torch.Tensor) -> torch.Tensor:
         if target_score.ndim != 3:
@@ -116,6 +117,30 @@ class TrainStage:
             return 0.0
         return float(sum(values) / len(values))
 
+    def _mean_pearson(
+        self,
+        pred_btq: torch.Tensor,
+        target_btq: torch.Tensor,
+    ) -> float:
+        values = []
+
+        for b in range(pred_btq.shape[0]):
+            for t in range(pred_btq.shape[1]):
+                px = pred_btq[b, t] - pred_btq[b, t].mean()
+                tx = target_btq[b, t] - target_btq[b, t].mean()
+
+                denom = torch.sqrt((px ** 2).sum() * (tx ** 2).sum()).item()
+                if denom < 1e-12:
+                    values.append(0.0)
+                    continue
+
+                corr = float((px * tx).sum().item() / denom)
+                values.append(corr)
+
+        if not values:
+            return 0.0
+        return float(sum(values) / len(values))
+
     def _top1_acc(
         self,
         pred_btq: torch.Tensor,
@@ -138,8 +163,32 @@ class TrainStage:
         top2 = torch.topk(logits_btq, k=2, dim=-1).values
         return float((top2[..., 0] - top2[..., 1]).mean().item())
 
+    def _collect_stats(
+        self,
+        pred_logits_btq: torch.Tensor,
+        pred_prob_btq: torch.Tensor,
+        teacher_logits_btq: torch.Tensor,
+        teacher_prob_btq: torch.Tensor,
+        prefix: str,
+    ) -> Dict[str, float]:
+        return {
+            f"{prefix}_logits_std": float(pred_logits_btq.std(dim=-1).mean().item()),
+            f"{prefix}_logits_min": float(pred_logits_btq.min().item()),
+            f"{prefix}_logits_max": float(pred_logits_btq.max().item()),
+            f"{prefix}_gap_logit": self._top1_top2_gap(pred_logits_btq),
+            f"{prefix}_entropy": self._mean_entropy(pred_prob_btq),
+            f"{prefix}_max_prob": self._mean_max_prob(pred_prob_btq),
+            f"{prefix}_top1_acc_prob": self._top1_acc(pred_prob_btq, teacher_prob_btq),
+            f"{prefix}_top1_acc_logit": self._top1_acc(pred_logits_btq, teacher_logits_btq),
+            f"{prefix}_mean_spearman_logit": self._mean_spearman(pred_logits_btq, teacher_logits_btq),
+            f"{prefix}_mean_pearson_logit": self._mean_pearson(pred_logits_btq, teacher_logits_btq),
+        }
+
     def get_debug_tensors(self) -> Dict[str, torch.Tensor]:
         return self.last_debug_tensors
+
+    def get_debug_scalars(self) -> Dict[str, float]:
+        return self.last_debug_scalars
 
     def step(
         self,
@@ -162,16 +211,20 @@ class TrainStage:
         if target_score.device != self.device:
             target_score = target_score.to(self.device, non_blocking=True)
 
+        teacher_logits_btq, teacher_prob_btq = self._build_teacher_prob_btq(target_score)
+
         self.model.train()
-        _, pred_logits, embedding = self.model(
+        _, train_pred_logits_btq, train_embedding_be = self.model(
             pattern,
             return_logits=True,
             return_embedding=True,
         )
 
-        proxy_loss, teacher_logits_btq, teacher_prob_btq = self._compute_proxy_loss(
-            pred_logits,
-            target_score,
+        proxy_loss = F.kl_div(
+            self._build_student_log_prob_btq(train_pred_logits_btq),
+            teacher_prob_btq,
+            reduction="batchmean",
+            log_target=False,
         )
 
         total_loss = proxy_loss
@@ -188,46 +241,93 @@ class TrainStage:
         self.optimizer.step()
 
         with torch.no_grad():
-            pred_logits_btq = pred_logits.detach()
-            pred_prob_btq = torch.softmax(pred_logits_btq, dim=-1)
+            train_pred_logits_btq = train_pred_logits_btq.detach()
+            train_pred_prob_btq = torch.softmax(train_pred_logits_btq, dim=-1)
+            train_embedding_be = train_embedding_be.detach()
 
-            pred_std = float(pred_logits_btq.std(dim=-1).mean().item())
-            pred_gap = self._top1_top2_gap(pred_logits_btq)
+            self.model.eval()
+            _, eval_pred_logits_btq, eval_embedding_be = self.model(
+                pattern,
+                return_logits=True,
+                return_embedding=True,
+            )
+            eval_pred_logits_btq = eval_pred_logits_btq.detach()
+            eval_pred_prob_btq = torch.softmax(eval_pred_logits_btq, dim=-1)
+            eval_embedding_be = eval_embedding_be.detach()
+
+            self.model.train()
+
             teacher_gap = self._top1_top2_gap(teacher_logits_btq)
-
-            score_spearman = self._mean_spearman(pred_logits_btq, teacher_logits_btq)
-            score_top1_acc = self._top1_acc(pred_prob_btq, teacher_prob_btq)
-
             teacher_entropy = self._mean_entropy(teacher_prob_btq)
-            pred_entropy = self._mean_entropy(pred_prob_btq)
-
             teacher_max_prob = self._mean_max_prob(teacher_prob_btq)
-            pred_max_prob = self._mean_max_prob(pred_prob_btq)
 
-            emb_norm = float(embedding.norm(dim=-1).mean().item())
+            train_eval_logit_abs_diff = float(
+                (train_pred_logits_btq - eval_pred_logits_btq).abs().mean().item()
+            )
+            train_eval_prob_abs_diff = float(
+                (train_pred_prob_btq - eval_pred_prob_btq).abs().mean().item()
+            )
+            train_eval_top1_consistency = float(
+                (
+                    train_pred_logits_btq.argmax(dim=-1)
+                    == eval_pred_logits_btq.argmax(dim=-1)
+                ).float().mean().item()
+            )
+            embedding_abs_diff = float(
+                (train_embedding_be - eval_embedding_be).abs().mean().item()
+            )
 
-            self.last_debug_tensors = {
-                "pred_logits": pred_logits_btq.cpu(),
-                "pred_prob": pred_prob_btq.cpu(),
-                "teacher_logits": teacher_logits_btq.cpu(),
-                "teacher_prob": teacher_prob_btq.cpu(),
-                "embedding": embedding.detach().cpu(),
+            emb_norm_train = float(train_embedding_be.norm(dim=-1).mean().item())
+            emb_norm_eval = float(eval_embedding_be.norm(dim=-1).mean().item())
+
+            metrics = {
+                "loss": float(total_loss.item()),
+                "proxy_loss": float(proxy_loss.item()),
+                "teacher_gap_logit": teacher_gap,
+                "teacher_entropy": teacher_entropy,
+                "teacher_max_prob": teacher_max_prob,
+                "embedding_norm_train": emb_norm_train,
+                "embedding_norm_eval": emb_norm_eval,
+                "train_eval_logit_abs_diff": train_eval_logit_abs_diff,
+                "train_eval_prob_abs_diff": train_eval_prob_abs_diff,
+                "train_eval_top1_consistency": train_eval_top1_consistency,
+                "embedding_abs_diff": embedding_abs_diff,
             }
 
-        return {
-            "loss": float(total_loss.item()),
-            "proxy_loss": float(proxy_loss.item()),
-            "score_spearman": score_spearman,
-            "score_top1_acc": score_top1_acc,
-            "pred_std": pred_std,
-            "top1_top2_gap": pred_gap,
-            "teacher_top1_top2_gap": teacher_gap,
-            "teacher_entropy": teacher_entropy,
-            "pred_entropy": pred_entropy,
-            "teacher_max_prob": teacher_max_prob,
-            "pred_max_prob": pred_max_prob,
-            "embedding_norm": emb_norm,
-        }
+            metrics.update(
+                self._collect_stats(
+                    train_pred_logits_btq,
+                    train_pred_prob_btq,
+                    teacher_logits_btq,
+                    teacher_prob_btq,
+                    prefix="train",
+                )
+            )
+            metrics.update(
+                self._collect_stats(
+                    eval_pred_logits_btq,
+                    eval_pred_prob_btq,
+                    teacher_logits_btq,
+                    teacher_prob_btq,
+                    prefix="eval",
+                )
+            )
+
+            self.last_debug_tensors = {
+                "pattern": pattern.detach().cpu(),
+                "target_score": target_score.detach().cpu(),
+                "teacher_logits": teacher_logits_btq.detach().cpu(),
+                "teacher_prob": teacher_prob_btq.detach().cpu(),
+                "train_pred_logits": train_pred_logits_btq.cpu(),
+                "train_pred_prob": train_pred_prob_btq.cpu(),
+                "eval_pred_logits": eval_pred_logits_btq.cpu(),
+                "eval_pred_prob": eval_pred_prob_btq.cpu(),
+                "train_embedding": train_embedding_be.cpu(),
+                "eval_embedding": eval_embedding_be.cpu(),
+            }
+            self.last_debug_scalars = metrics
+
+        return metrics
 
     def get_state_dict(self) -> Dict[str, Any]:
         return {

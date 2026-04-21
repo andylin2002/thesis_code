@@ -37,7 +37,7 @@ class BaselineEstimatorStrategy(IEstimator):
     def estimate(
         self, 
         features: torch.Tensor, 
-        raw_csi_block: Optional[torch.Tensor] = None
+        aggregated_csi: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         estimator = BaselineEstimator(
             features=features,
@@ -126,7 +126,7 @@ class ProposedEstimatorStrategy(IEstimator):
     def estimate(
         self, 
         features: torch.Tensor, 
-        raw_csi_block: Optional[torch.Tensor] = None
+        aggregated_csi: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Pipeline: 
@@ -136,9 +136,9 @@ class ProposedEstimatorStrategy(IEstimator):
         # Get gating weight
         reliability: Optional[torch.Tensor] = None
 
-        if raw_csi_block is not None:
+        if aggregated_csi is not None:
             try:
-                reliability = self.gating_evaluator.evaluate(raw_csi_block)
+                reliability = self.gating_evaluator.evaluate(aggregated_csi)
 
             except Exception as e:
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")

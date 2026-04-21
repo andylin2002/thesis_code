@@ -54,7 +54,7 @@ class SymbolicRuntime:
         aggregated_csi = getattr(self.signal_processor, "aggregated_csi", None)
 
         # Stage 2: Location Estimation
-        trajectory = self.location_estimator.estimate(features, raw_csi_block)
+        trajectory = self.location_estimator.estimate(features, aggregated_csi)
 
         emission_log_probs_qgt = getattr(self.location_estimator, "emission_log_probs_qgt", None)
         posterior_gt = getattr(self.location_estimator, "posterior_gt", None)

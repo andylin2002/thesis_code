@@ -114,23 +114,32 @@ class NeuralRuntime:
 
         self.num_updates += 1
 
-        if self.save_debug and (self.num_updates % self.debug_save_interval == 0):
-            debug_tensors = self.train.get_debug_tensors()
-            self._save_debug_tensors(
-                pattern=pattern_bqtcm,
-                target_score=target_score_bqt,
-                pred_logits=debug_tensors.get("pred_logits"),
-                pred_prob=debug_tensors.get("pred_prob"),
-                teacher_prob=debug_tensors.get("teacher_prob"),
-                embedding=debug_tensors.get("embedding"),
-                num_windows=s,
-                window_size=w,
-            )
-
         should_publish = (
             self.num_updates >= self.min_updates_before_publish
             and self.num_updates % self.update_interval == 0
         )
+
+        if self.save_debug and (self.num_updates % self.debug_save_interval == 0):
+            debug_tensors = self.train.get_debug_tensors()
+            debug_scalars = self.train.get_debug_scalars()
+            self._save_debug_tensors(
+                pattern=pattern_bqtcm,
+                target_score=target_score_bqt,
+                aggregated_csi=aggregated_csi_bqtnm,
+                emission_log_probs_qgt=emission_swqgt.reshape(s * w, q, g, t),
+                train_pred_logits=debug_tensors.get("train_pred_logits"),
+                train_pred_prob=debug_tensors.get("train_pred_prob"),
+                eval_pred_logits=debug_tensors.get("eval_pred_logits"),
+                eval_pred_prob=debug_tensors.get("eval_pred_prob"),
+                teacher_logits=debug_tensors.get("teacher_logits"),
+                teacher_prob=debug_tensors.get("teacher_prob"),
+                train_embedding=debug_tensors.get("train_embedding"),
+                eval_embedding=debug_tensors.get("eval_embedding"),
+                debug_scalars=debug_scalars,
+                num_windows=s,
+                window_size=w,
+                should_publish=should_publish,
+            )
 
         if should_publish:
             return {
@@ -167,43 +176,80 @@ class NeuralRuntime:
         self,
         pattern: torch.Tensor,
         target_score: torch.Tensor,
-        pred_logits: Optional[torch.Tensor],
-        pred_prob: torch.Tensor,
-        teacher_prob: torch.Tensor,
-        embedding: Optional[torch.Tensor],
+        aggregated_csi: torch.Tensor,
+        emission_log_probs_qgt: torch.Tensor,
+        train_pred_logits: Optional[torch.Tensor],
+        train_pred_prob: Optional[torch.Tensor],
+        eval_pred_logits: Optional[torch.Tensor],
+        eval_pred_prob: Optional[torch.Tensor],
+        teacher_logits: Optional[torch.Tensor],
+        teacher_prob: Optional[torch.Tensor],
+        train_embedding: Optional[torch.Tensor],
+        eval_embedding: Optional[torch.Tensor],
+        debug_scalars: Dict[str, float],
         num_windows: int,
         window_size: int,
+        should_publish: bool,
     ) -> None:
         step_dir = os.path.join(self.debug_dir, f"step_{self.num_updates:06d}")
         os.makedirs(step_dir, exist_ok=True)
 
         np.save(
+            os.path.join(step_dir, "pattern_bqtcm.npy"),
+            pattern.detach().cpu().numpy(),
+        )
+        np.save(
+            os.path.join(step_dir, "aggregated_csi_bqtnm.npy"),
+            aggregated_csi.detach().cpu().numpy(),
+        )
+        np.save(
+            os.path.join(step_dir, "emission_log_probs_qgt_bqgt.npy"),
+            emission_log_probs_qgt.detach().cpu().numpy(),
+        )
+        np.save(
             os.path.join(step_dir, "target_score_bqt.npy"),
             target_score.detach().cpu().numpy(),
         )
 
-        if pred_logits is not None:
+        if train_pred_logits is not None:
             np.save(
-                os.path.join(step_dir, "pred_logits_btq.npy"),
-                pred_logits.detach().cpu().numpy(),
+                os.path.join(step_dir, "train_pred_logits_btq.npy"),
+                train_pred_logits.detach().cpu().numpy(),
             )
-
-        if pred_prob is not None:
+        if train_pred_prob is not None:
             np.save(
-                os.path.join(step_dir, "pred_prob_btq.npy"),
-                pred_prob.detach().cpu().numpy(),
+                os.path.join(step_dir, "train_pred_prob_btq.npy"),
+                train_pred_prob.detach().cpu().numpy(),
             )
-
+        if eval_pred_logits is not None:
+            np.save(
+                os.path.join(step_dir, "eval_pred_logits_btq.npy"),
+                eval_pred_logits.detach().cpu().numpy(),
+            )
+        if eval_pred_prob is not None:
+            np.save(
+                os.path.join(step_dir, "eval_pred_prob_btq.npy"),
+                eval_pred_prob.detach().cpu().numpy(),
+            )
+        if teacher_logits is not None:
+            np.save(
+                os.path.join(step_dir, "teacher_logits_btq.npy"),
+                teacher_logits.detach().cpu().numpy(),
+            )
         if teacher_prob is not None:
             np.save(
                 os.path.join(step_dir, "teacher_prob_btq.npy"),
                 teacher_prob.detach().cpu().numpy(),
             )
-
-        if embedding is not None:
+        if train_embedding is not None:
             np.save(
-                os.path.join(step_dir, "embedding_be.npy"),
-                embedding.detach().cpu().numpy(),
+                os.path.join(step_dir, "train_embedding_be.npy"),
+                train_embedding.detach().cpu().numpy(),
+            )
+        if eval_embedding is not None:
+            np.save(
+                os.path.join(step_dir, "eval_embedding_be.npy"),
+                eval_embedding.detach().cpu().numpy(),
             )
 
         pattern_mean = pattern.detach().mean(dim=(-1, -2)).cpu().numpy()
@@ -213,9 +259,16 @@ class NeuralRuntime:
         )
 
         meta = {
-            "num_windows": num_windows,
-            "window_size": window_size,
+            "step": int(self.steps),
+            "num_updates": int(self.num_updates),
+            "num_windows": int(num_windows),
+            "window_size": int(window_size),
             "num_block_samples": int(target_score.shape[0]),
+            "should_publish": bool(should_publish),
+            "update_interval": int(self.update_interval),
+            "min_updates_before_publish": int(self.min_updates_before_publish),
+            "updates_per_batch": int(self.updates_per_batch),
+            "debug_scalars": debug_scalars,
         }
         np.save(
             os.path.join(step_dir, "meta.npy"),

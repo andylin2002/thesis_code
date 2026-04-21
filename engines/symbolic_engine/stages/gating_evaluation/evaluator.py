@@ -1,5 +1,6 @@
 # engines/symbolic_engine/stages/gating_evaluation/evaluator.py
 
+import os
 import torch
 from typing import Any, Dict, Tuple, Union
 
@@ -21,9 +22,31 @@ class GatingEvaluator:
         self.represent = RepresentStage(config, device)
         self.model = NeuralReliabilityModel(config).to(self.device)
         self._set_eval_mode()
+        self._load_checkpoint_if_exists()
 
     def _set_eval_mode(self) -> None:
         self.model.eval()
+
+    def _load_checkpoint_if_exists(self) -> None:
+        ckpt_dir = "checkpoint"
+        scene_name = self.config.get("SCENARIO_NAME", "default_scene")
+        ckpt_path = os.path.join(ckpt_dir, f"{scene_name}.ckpt")
+
+        if not os.path.exists(ckpt_path):
+            print(f"[GatingEvaluator] No checkpoint found at startup: {ckpt_path}")
+            return
+
+        try:
+            checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=True)
+            state_dict = checkpoint["state_dict"]
+            model_state = state_dict.get("model", None)
+            if model_state is None:
+                raise KeyError("Missing key 'model' in checkpoint['state_dict']")
+            self.model.load_state_dict(model_state, strict=True)
+            self._set_eval_mode()
+            print(f"[GatingEvaluator] Loaded checkpoint at startup: {ckpt_path}")
+        except Exception as e:
+            print(f"[GatingEvaluator] Failed to load startup checkpoint: {e}")
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         if not isinstance(state_dict, dict):
