@@ -40,12 +40,18 @@ class SymbolicWorker(BaseWorker):
         neural_queue = self.queues.get("data_neural", None)
         debug_queue = self.queues.get("debug", None)       # Optional debug
 
-        use_neural = self.config.get("USE_NEURAL", True)
+        enable_neural = self.config.get("ENABLE_NEURAL", True)
 
         session_idx = 0
         while not self.stop_event.is_set():
             try:
                 raw_csi_block = in_queue.get(timeout=0.1)
+                if isinstance(raw_csi_block, dict) and raw_csi_block.get("type") == "end_of_sequence":
+                    if enable_neural and neural_queue is not None:
+                        neural_queue.put(raw_csi_block)
+
+                    in_queue.task_done()
+                    continue
             except Empty:
                 continue
             
@@ -56,9 +62,9 @@ class SymbolicWorker(BaseWorker):
 
                 # Always send main output
                 out_queue.put(pkg_cpu)
-                print(f"[{self.name}] Save #{session_idx} prediction trajectory!")
+                print(f"[{self.name}] Save #{session_idx} outputs!")
 
-                if use_neural and neural_queue is not None:
+                if enable_neural and neural_queue is not None:
                     neural_pkg = {
                         "aggregated_csi": pkg_cpu["aggregated_csi"],
                         "emission_log_probs_qgt": pkg_cpu["emission_log_probs_qgt"],

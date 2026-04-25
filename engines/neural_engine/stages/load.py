@@ -51,6 +51,13 @@ class LoadStage:
 
     def size(self) -> int:
         return len(self.pending_new_blocks)
+    
+    def reset_sequence(self) -> None:
+        """
+        Clear sequence-dependent buffers when switching to a new CSI dataset.
+        """
+        self.pending_new_blocks.clear()
+        self.history_tail_blocks.clear()
 
     def get_window(self) -> Optional[Dict[str, Optional[torch.Tensor]]]:
         if not self.ready():

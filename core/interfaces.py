@@ -23,7 +23,7 @@ class IEstimator(ABC):
     Estimate trajectory from features.
     """
     @abstractmethod
-    def estimate(self, signal_data):
+    def estimate(self, features, aggregated_csi=None):
         """
         Args:
             features: torch.Tensor
@@ -44,7 +44,6 @@ class BaseWorker(Process, ABC):
         self.stop_event = stop_event
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.config['device'] = self.device
 
     def run(self):
         """

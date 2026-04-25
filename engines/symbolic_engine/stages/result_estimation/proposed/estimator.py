@@ -65,8 +65,8 @@ class ProposedEstimator:
         # Process: Init -> [Calc EPD -> Calc Gamma -> Update Params] * N -> Converged Parameters
         self.softem.set_reliability(self.reliability)
         
-        use_soft_em = self.config.get("USE_SOFT_EM", True)
-        if use_soft_em:
+        enable_soft_em = self.config.get("ENABLE_SOFT_EM", True)
+        if enable_soft_em:
             self.softem.step_parameters()
         else:
             self.softem.build_initial_state_only()
@@ -76,15 +76,17 @@ class ProposedEstimator:
         self.emission_log_probs_gt = self.softem.get_emission_log_probs_gt()
         self.posterior_gt = self.softem.get_posterior_gt()
 
-        # --- Step 3: AI-Assisted Trajectory Estimation (Viterbi) ---
-        # Run Viterbi once with the AI Transition Handler
-        trajectory, _ = self.viterbi.run(
-            emission_log_probs=self.emission_log_probs_gt,
-            neighbor_index_matrix=self.neighbor_matrix,
-            get_max_previous_score=soft_em_utils.get_max_previous_score,
-            transition_log_probs=self.transition_log_probs
-        )
-
-        self.trajectory = trajectory
+        # --- Step 3: Trajectory Decoding ---
+        enable_trajectory_decoding = self.config.get("ENABLE_TRAJECTORY_DECODING", True)
+        if enable_trajectory_decoding:
+            trajectory, _ = self.viterbi.run(
+                emission_log_probs=self.emission_log_probs_gt,
+                neighbor_index_matrix=self.neighbor_matrix,
+                get_max_previous_score=soft_em_utils.get_max_previous_score,
+                transition_log_probs=self.transition_log_probs
+            )
+            self.trajectory = trajectory
+        else:
+            self.trajectory = None
 
         return self.trajectory

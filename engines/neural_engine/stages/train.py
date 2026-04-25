@@ -22,9 +22,9 @@ class TrainStage:
         self.config = config
         self.device = device
 
-        self.learning_rate = float(config.get("LR", 1e-3))
+        self.learning_rate = float(config.get("LEARNING_RATE", 1e-3))
         self.weight_decay = float(config.get("WEIGHT_DECAY", 0.0))
-        self.grad_clip_norm = float(config.get("GRAD_CLIP_NORM", 1.0))
+        self.gradient_clip_norm = float(config.get("GRADIENT_CLIP_NORM", 1.0))
 
         self.teacher_temperature = float(config.get("TEACHER_TEMPERATURE", 1.0))
         self.student_temperature = float(config.get("STUDENT_TEMPERATURE", 1.0))
@@ -232,10 +232,10 @@ class TrainStage:
         self.optimizer.zero_grad()
         total_loss.backward()
 
-        if self.grad_clip_norm > 0:
+        if self.gradient_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
-                max_norm=self.grad_clip_norm,
+                max_norm=self.gradient_clip_norm,
             )
 
         self.optimizer.step()

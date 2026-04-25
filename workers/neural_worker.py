@@ -27,7 +27,7 @@ class NeuralWorker(BaseWorker):
     ):
         super().__init__(name, config, queues, stop_event)
         self.runtime: Optional[NeuralRuntime] = None
-        self.ckpt_dir = "checkpoint"
+        self.ckpt_dir = config.get("CHECKPOINT_DIR", "checkpoint")
         self.scene_name = config.get("SCENARIO_NAME", "default_scene")
         self.ckpt_path = os.path.join(self.ckpt_dir, f"{self.scene_name}.ckpt")
 
@@ -43,7 +43,7 @@ class NeuralWorker(BaseWorker):
         os.makedirs(self.ckpt_dir, exist_ok=True)
         
         # Hyperparameters from config
-        save_interval = self.config.get("NEURAL_SAVE_INTERVAL", 50)
+        checkpoint_save_interval = self.config.get("CHECKPOINT_SAVE_INTERVAL", 50)
         neural_sleep = self.config.get("NEURAL_SLEEP", 0.05)
         
         while not self.stop_event.is_set():
@@ -57,6 +57,42 @@ class NeuralWorker(BaseWorker):
 
                 if self.runtime is None:
                     raise RuntimeError("Runtime not initialized")
+                
+                if isinstance(neural_pkg, dict) and neural_pkg.get("type") == "end_of_sequence":
+                    source = neural_pkg.get("source", "unknown")
+                    print(f"[{self.name}] End of CSI sequence received: {source}")
+
+                    if self.runtime.load is not None:
+                        print(f"[{self.name}] Load state before reset: {self.runtime.load.state_dict()}")
+
+                    # Publish latest trained model to SymbolicWorker
+                    if self.runtime.train is not None:
+                        try:
+                            state_dict = self.runtime.train.get_state_dict()
+                            state_dict = self._to_cpu(state_dict)
+
+                            while not model_queue.empty():
+                                try:
+                                    model_queue.get_nowait()
+                                except Empty:
+                                    break
+
+                            model_queue.put({
+                                "type": "model_update",
+                                "state_dict": state_dict,
+                                "step": self.runtime.steps,
+                                "num_updates": self.runtime.num_updates,
+                                "source": source,
+                            })
+
+                            print(f"[{self.name}] Published latest model at end of sequence: {source}")
+
+                        except Exception as e:
+                            print(f"[{self.name}] End-of-sequence publish failed: {e}")
+
+                    self.runtime.save_checkpoint(self.ckpt_path)
+                    self.runtime.reset_sequence()
+                    continue
 
                 # 2. Push packet to runtime exactly ONCE (No NUM_EPOCHS loop)
                 metrics_pkg = self.runtime.run_step(neural_pkg)
@@ -72,7 +108,7 @@ class NeuralWorker(BaseWorker):
                     if metrics_pkg.get("type") == "model_update":
                         try:
                             payload = {
-                                "state_dict": metrics_pkg["state_dict"],
+                                "state_dict": self._to_cpu(metrics_pkg["state_dict"]),
                                 "step": current_step,
                                 "loss": loss
                             }
@@ -89,7 +125,7 @@ class NeuralWorker(BaseWorker):
                             print(f"[{self.name}] Sync failed: {e}")
 
                     # Auto-save logic
-                    if current_step > 0 and current_step % save_interval == 0:
+                    if current_step > 0 and current_step % checkpoint_save_interval == 0:
                         self.runtime.save_checkpoint(self.ckpt_path)
                         print(f"[{self.name}] Checkpoint saved to {self.ckpt_path}")
                 
@@ -108,3 +144,14 @@ class NeuralWorker(BaseWorker):
         if self.runtime:
             self.runtime.save_checkpoint(self.ckpt_path)
             print(f"[{self.name}] Final checkpoint saved. Shutting down.")
+
+    def _to_cpu(self, obj):
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu()
+        if isinstance(obj, dict):
+            return {k: self._to_cpu(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._to_cpu(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self._to_cpu(v) for v in obj)
+        return obj

@@ -11,27 +11,27 @@ class SystemFactory:
     @staticmethod
     def create_signal_processor(config, device):
         """
-        Creates an ISignalProcessor instance based on SYSTEM_MODE.
+        Creates an ISignalProcessor instance based on METHOD.
         """
-        mode = config.get('SYSTEM_MODE', 'BASELINE').upper()
+        method = config.get('METHOD', 'BASELINE').upper()
         
-        if mode == 'BASELINE':
+        if method == 'BASELINE':
             return BaselineProcessorStrategy(config, device)
         
-        elif mode == 'PROPOSED':
+        elif method == 'PROPOSED':
             return ProposedProcessorStrategy(config, device)
             
         else:
-            raise ValueError(f"[Factory] Unknown SYSTEM_MODE: {mode}")
+            raise ValueError(f"[Factory] Unknown METHOD: {method}")
 
     @staticmethod
     def create_location_estimator(config, device, reference_grid, directions_vectors):
         """
-        Creates an ILocationEstimator instance based on SYSTEM_MODE.
+        Creates an ILocationEstimator instance based on METHOD.
         """
-        mode = config.get('SYSTEM_MODE', 'BASELINE').upper()
+        method = config.get('METHOD', 'BASELINE').upper()
         
-        if mode == 'BASELINE':
+        if method == 'BASELINE':
             return BaselineEstimatorStrategy(
                 config, 
                 device, 
@@ -39,7 +39,7 @@ class SystemFactory:
                 directions_vectors
             )
         
-        elif mode == 'PROPOSED':
+        elif method == 'PROPOSED':
             return ProposedEstimatorStrategy(
                 config, 
                 device, 
@@ -48,4 +48,4 @@ class SystemFactory:
             )
             
         else:
-            raise ValueError(f"[Factory] Unknown SYSTEM_MODE: {mode}")
+            raise ValueError(f"[Factory] Unknown METHOD: {method}")

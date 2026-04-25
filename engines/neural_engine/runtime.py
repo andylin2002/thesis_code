@@ -29,10 +29,10 @@ class NeuralRuntime:
         self.steps = 0
         self.num_updates = 0
 
-        self.update_interval = int(config.get("NEURAL_UPDATE_INTERVAL", 10))
-        self.min_updates_before_publish = int(config.get("NEURAL_MIN_UPDATES", 50))
+        self.publish_interval = int(config.get("NEURAL_PUBLISH_INTERVAL", 10))
+        self.min_updates_before_publish = int(config.get("NEURAL_MIN_UPDATES_BEFORE_PUBLISH", 50))
 
-        self.save_debug = bool(config.get("SAVE_NEURAL_DEBUG", False))
+        self.enable_neural_debug = bool(config.get("ENABLE_NEURAL_DEBUG", False))
         self.debug_dir = str(config.get("NEURAL_DEBUG_DIR", "output/neural_debug"))
         self.debug_save_interval = int(config.get("NEURAL_DEBUG_SAVE_INTERVAL", 50))
         self.updates_per_batch = int(config.get("NEURAL_UPDATES_PER_BATCH", 1))
@@ -47,7 +47,7 @@ class NeuralRuntime:
 
         self.neighbor_index_matrix = self._load_neighbor_index_matrix()
 
-        if self.save_debug:
+        if self.enable_neural_debug:
             os.makedirs(self.debug_dir, exist_ok=True)
 
     @property
@@ -55,6 +55,13 @@ class NeuralRuntime:
         if self.train is None:
             raise RuntimeError("Runtime not setup.")
         return self.train.model
+    
+    def reset_sequence(self) -> None:
+        if self.load is None:
+            return
+
+        self.load.reset_sequence()
+        print("[NeuralRuntime] Sequence buffers cleared.")
 
     def run_step(self, neural_pkg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if (
@@ -116,10 +123,10 @@ class NeuralRuntime:
 
         should_publish = (
             self.num_updates >= self.min_updates_before_publish
-            and self.num_updates % self.update_interval == 0
+            and self.num_updates % self.publish_interval == 0
         )
 
-        if self.save_debug and (self.num_updates % self.debug_save_interval == 0):
+        if self.enable_neural_debug and (self.num_updates % self.debug_save_interval == 0):
             debug_tensors = self.train.get_debug_tensors()
             debug_scalars = self.train.get_debug_scalars()
             self._save_debug_tensors(
@@ -265,7 +272,7 @@ class NeuralRuntime:
             "window_size": int(window_size),
             "num_block_samples": int(target_score.shape[0]),
             "should_publish": bool(should_publish),
-            "update_interval": int(self.update_interval),
+            "publish_interval": int(self.publish_interval),
             "min_updates_before_publish": int(self.min_updates_before_publish),
             "updates_per_batch": int(self.updates_per_batch),
             "debug_scalars": debug_scalars,

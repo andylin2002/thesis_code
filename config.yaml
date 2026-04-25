@@ -1,95 +1,154 @@
 # config.yaml
 
-### --- LOOP --- ###
-LOOP: False
+# ============================================================
+# 1. Execution Control
+# ============================================================
 
-### --- System Mode --- ###
-#SYSTEM_MODE: 'BASELINE'
-SYSTEM_MODE: 'PROPOSED'
+### --- Method --- ###
+METHOD: 'PROPOSED'
+# Options: 'BASELINE' or 'PROPOSED'
 
-### --- Environment & Trajectory --- ###
+EM_MAX_ITER: 100
+
+OUTPUT_DIR: "output"
+CHECKPOINT_DIR: "checkpoint"
+
+# ============================================================
+# 2. Dataset & Environment
+# ============================================================
+
+### --- Dataset --- ###
 DATASET_FOLDER: "dataset_office_8AP"
 ENV_CONFIG: "env_config.yaml"
-HMATRIX_LIST:
-  - "NLoS_t799_ch36_ant3" #NLoS_t150_ch36_ant3, train_direct, NLoS_t799_ch36_ant3, train_wander
 
-### --- Grid Generation Parameters --- ###
-GRID_RESOLUTION_M: 0.5
-BUFFER_DISTANCE_M: 0
+### --- Trajectories (Paths) --- ###
+CSI_DATASETS:
+  - "NLoS_t799_ch36_ant3"
+  # Options:
+  # - "NLoS_t799_ch36_ant3"
+  # - "train_direct"
+  # - "train_wander"
+  # - "train_long"
 
-### --- 2. System Setup --- ###
+
+# ============================================================
+# 3. Grid & Spatial Setup
+# ============================================================
+
+GRID_RESOLUTION_M: 0.5      # grid size (meters)
+BUFFER_DISTANCE_M: 0        # boundary padding
+
+
+# ============================================================
+# 4. CSI & Physical Parameters
+# ============================================================
+
+### --- CSI Dimensions --- ###
 CSI_DIMENSIONS:
-  NUM_RX_ANTENNAS: 3                      # notation: N
-  NUM_SUBCARRIERS: 21                     # notation: M       ch36: 21,       ch106: 81
-  
-### --- Frequency & Inter-element Spacing --- ###
-CARRIER_FREQUENCY_HZ: 5180000000.0        # center frequency  ch36: 518,      ch106: 553
-CHANNEL_BANDWIDTH_HZ: 20000000.0          # notation: B       ch36: 20,       ch106: 80
-ANTENNA_DISTANCE: 0.02899                  # notation: d       ch36: 0.02899,  ch106: 0.0273
+  NUM_RX_ANTENNAS: 3        # N
+  NUM_SUBCARRIERS: 21       # M (ch36:21, ch106:81)
+
+### --- RF / Physical --- ###
+CARRIER_FREQUENCY_HZ: 5180000000.0   # Center Frequency Hz
+# Options: 5180000000.0 (ch36) or 5530000000.0 (ch106)
+CHANNEL_BANDWIDTH_HZ: 20000000.0     # Hz (B)
+# Options: 20000000.0 (ch36) or 80000000.0 (ch106)
+ANTENNA_DISTANCE: 0.02899            # meters (d)
+# Options: 0.02899 (ch36) or 0.0273 (ch106)
+
+
+# ============================================================
+# 5. Signal Processing
+# ============================================================
 
 ### --- Packeting & Aggregation --- ###
-NUM_SAMPLE: 15                            # notation: T
-NUM_PACKET: 1                             # notation: P
+NUM_SAMPLE: 15              # T (time steps)
+NUM_PACKET: 1               # P (packets per sample)
 
-### --- Ablation Study --- ###
-BASELINE_AOA_METHOD: 'mmp'              # 'music' or 'mmp'
-USE_SOFT_EM: True
-USE_TOF_GAIN_WEIGHT: True
-USE_NEURAL: True
 
-### --- neural worker / runtime --- ###
+# ============================================================
+# 6. Symbolic Engine (Physics / EM)
+# ============================================================
+
+### --- Ablation / Variants --- ###
+BASELINE_AOA_METHOD: 'mmp'   # 'music' or 'mmp'
+ENABLE_SOFT_EM: True
+ENABLE_TOF_GAIN_WEIGHT: True
+ENABLE_TRAJECTORY_DECODING: True
+
+### --- Neural Integration --- ###
+ENABLE_NEURAL: True            # enable neural reliability module
+
+
+# ============================================================
+# 7. Neural Training (Data Flow)
+# ============================================================
+
+### --- Runtime --- ###
 NEURAL_SLEEP: 0.05
+
+### --- Sequence Construction --- ###
 NEURAL_BATCH_SIZE: 32
 NEURAL_WINDOW_SIZE: 16
 NEURAL_WINDOW_STRIDE: 4
 NEURAL_SEQUENCE_BUFFER_CAPACITY: 128
 
+### --- Training Control --- ###
 NEURAL_UPDATES_PER_BATCH: 50
 
-NEURAL_UPDATE_INTERVAL: 1
-NEURAL_SAVE_INTERVAL: 50
-NEURAL_MIN_UPDATES: 1
+### --- Model Sync / Publishing --- ###
+NEURAL_PUBLISH_INTERVAL: 1
+NEURAL_MIN_UPDATES_BEFORE_PUBLISH: 1
 
-### --- debug --- ###
-SAVE_NEURAL_DEBUG: true
+### --- Checkpoint --- ###
+CHECKPOINT_SAVE_INTERVAL: 25
+
+
+# ============================================================
+# 8. Neural Debugging
+# ============================================================
+
+ENABLE_NEURAL_DEBUG: False
 NEURAL_DEBUG_DIR: output/neural_debug
 NEURAL_DEBUG_SAVE_INTERVAL: 1
 
-### --- model --- ###
+
+# ============================================================
+# 9. Neural Model Architecture
+# ============================================================
+
+### --- CNN --- ###
 NEURAL_CNN_CHANNELS: [16, 32]
 NEURAL_CNN_KERNEL_SIZE: 3
 
+### --- Temporal (TCN) --- ###
 NEURAL_TEMPORAL_DIM: 64
 NEURAL_TCN_KERNEL_SIZE: 3
 NEURAL_TCN_DILATIONS: [1, 2, 4]
 
+### --- Attention --- ###
 NEURAL_NUM_HEADS: 4
 NEURAL_AP_NUM_LAYERS: 2
 NEURAL_AP_FF_HIDDEN: 128
 
+### --- Embedding / Head --- ###
 NEURAL_EMBED_DIM: 128
 NEURAL_EMBED_HIDDEN: 64
 NEURAL_HEAD_HIDDEN: 64
 
-NEURAL_DROPOUT: 0.0
+### --- Regularization --- ###
+NEURAL_DROPOUT: 0.2
 
-### --- optimization --- ###
-LR: 0.002
+
+# ============================================================
+# 10. Optimization
+# ============================================================
+
+LEARNING_RATE: 0.005
 WEIGHT_DECAY: 0.0001
-GRAD_CLIP_NORM: 1.0
+GRADIENT_CLIP_NORM: 1.0
 
+### --- Distillation --- ###
 TEACHER_TEMPERATURE: 1.0
 STUDENT_TEMPERATURE: 1.0
 TEACHER_STD_FLOOR: 1e-4
-
-
-# DEBUG
-ACCESS_POINTS:
-  - ap1
-  - ap2
-  - ap3
-  - ap4
-  - ap5
-  - ap6
-  - ap7
-  - ap8
