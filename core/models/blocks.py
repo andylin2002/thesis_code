@@ -91,8 +91,9 @@ class SubcarrierEncoder(nn.Module):
             ch_in = ch_out
 
         self.net = nn.Sequential(*layers)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.out_dim = conv_channels[-1]
+
+        # Pool subcarrier responses with richer statistics.
+        self.out_dim = conv_channels[-1] * 3
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:
@@ -100,9 +101,13 @@ class SubcarrierEncoder(nn.Module):
                 f"Expected input shape [B_flat,C,M], got {tuple(x.shape)}"
             )
 
-        y = self.net(x)
-        y = self.pool(y).squeeze(-1)
-        return y
+        y = self.net(x)  # [B_flat, D, M]
+
+        y_mean = y.mean(dim=-1)
+        y_max = y.max(dim=-1).values
+        y_std = y.std(dim=-1, unbiased=False)
+
+        return torch.cat([y_mean, y_max, y_std], dim=-1)
 
 
 class TemporalEncoder(nn.Module):
@@ -132,8 +137,8 @@ class TemporalEncoder(nn.Module):
                     dropout=dropout,
                 )
             )
-        self.tcn = nn.Sequential(*blocks)
 
+        self.tcn = nn.Sequential(*blocks)
         self.out_dim = hidden_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -146,6 +151,7 @@ class TemporalEncoder(nn.Module):
         y = y.transpose(1, 2).contiguous()
         y = self.tcn(y)
         y = y.transpose(1, 2).contiguous()
+
         return y
 
 
@@ -220,4 +226,5 @@ class APContextEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x)
+
         return x

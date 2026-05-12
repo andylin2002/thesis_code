@@ -247,7 +247,7 @@ def main():
 
             if dataset_trajectory:
                 np.save(
-                    os.path.join(dataset_output_dir, "predicted_trajectory.npy"),
+                    os.path.join(dataset_output_dir, "trajectory.npy"),
                     np.concatenate(dataset_trajectory, axis=0)
                 )
 

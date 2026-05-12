@@ -18,6 +18,7 @@ class BaselineProcessor:
         """
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.config["device"] = self.device
 
         self.aoa_method = config.get('BASELINE_AOA_METHOD', 'music').lower()
 

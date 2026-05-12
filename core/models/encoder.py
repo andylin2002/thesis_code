@@ -56,6 +56,9 @@ class CSIManifoldEncoder(nn.Module):
             dropout=dropout,
         )
 
+        # Encode fixed AP identity.
+        self.ap_embedding = nn.Embedding(self.num_aps, temporal_dim)
+
         self.ap_context_encoder = APContextEncoder(
             dim=temporal_dim,
             num_heads=num_heads,
@@ -97,15 +100,19 @@ class CSIManifoldEncoder(nn.Module):
         b, q, t, c, m = pattern.shape
 
         x = pattern.reshape(b * q * t, c, m)
-        x = self.subcarrier_encoder(x)             # [B*Q*T, D0]
-        x = x.view(b * q, t, -1)                  # [B*Q, T, D0]
+        x = self.subcarrier_encoder(x)       # [B*Q*T, D0]
+        x = x.view(b * q, t, -1)             # [B*Q, T, D0]
 
-        temporal = self.temporal_encoder(x)       # [B*Q, T, D]
+        temporal = self.temporal_encoder(x)  # [B*Q, T, D]
         temporal_bqtd = temporal.view(b, q, t, -1)
 
-        ctx = temporal_bqtd.permute(0, 2, 1, 3).contiguous()   # [B, T, Q, D]
-        ctx = ctx.view(b * t, q, -1)                           # [B*T, Q, D]
-        ctx = self.ap_context_encoder(ctx)                     # [B*T, Q, D]
+        ap_ids = torch.arange(q, device=pattern.device)
+        ap_emb = self.ap_embedding(ap_ids).view(1, q, 1, -1)
+        temporal_bqtd = temporal_bqtd + ap_emb
+
+        ctx = temporal_bqtd.permute(0, 2, 1, 3).contiguous()
+        ctx = ctx.view(b * t, q, -1)
+        ctx = self.ap_context_encoder(ctx)
         ctx = ctx.view(b, t, q, -1).permute(0, 2, 1, 3).contiguous()
 
         fused = torch.cat([temporal_bqtd, ctx], dim=-1)

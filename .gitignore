@@ -38,8 +38,10 @@ env/
 
 # Dataset
 dataset*
+dataset.tar.gz
 *.ckpt
 output/*
+experiments/*
 
 # Test
 analysis/

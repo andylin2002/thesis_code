@@ -19,9 +19,11 @@ class BlockEmbeddingHead(nn.Module):
         hidden_dim = int(config.get("NEURAL_EMBED_HIDDEN", in_dim))
         dropout = float(config.get("NEURAL_DROPOUT", 0.1))
 
-        self.norm = nn.LayerNorm(in_dim)
+        pooled_dim = in_dim * 3
+
+        self.norm = nn.LayerNorm(pooled_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(pooled_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, embed_dim),
@@ -33,7 +35,16 @@ class BlockEmbeddingHead(nn.Module):
                 f"Expected latent shape [B,Q,T,D], got {tuple(latent_bqtd.shape)}"
             )
 
-        pooled = latent_bqtd.mean(dim=(1, 2))   # [B, D]
+        b, q, t, d = latent_bqtd.shape
+        flat = latent_bqtd.reshape(b, q * t, d)
+
+        # Summarize the whole block with distribution statistics.
+        pooled_mean = flat.mean(dim=1)
+        pooled_max = flat.max(dim=1).values
+        pooled_std = flat.std(dim=1, unbiased=False)
+
+        pooled = torch.cat([pooled_mean, pooled_max, pooled_std], dim=-1)
+
         pooled = self.norm(pooled)
         z = self.mlp(pooled)
         z = F.normalize(z, dim=-1)
@@ -61,16 +72,15 @@ class ReliabilityHead(nn.Module):
 
         self.block_proj = nn.Linear(embed_dim, latent_dim)
 
-        # Per-AP feature fusion
+        # Fuse local, temporal, cross-AP, and block-level context.
         self.ap_token_proj = nn.Sequential(
-            nn.Linear(latent_dim * 6, hidden_dim),
+            nn.Linear(latent_dim * 4, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
 
-        # Joint AP mixing at each time step
         self.ap_mixer = nn.Sequential(
             nn.Linear(num_aps, num_aps),
             nn.GELU(),
@@ -78,7 +88,6 @@ class ReliabilityHead(nn.Module):
             nn.Linear(num_aps, num_aps),
         )
 
-        # Cross-AP refinement in hidden space
         self.cross_ap_refine = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -111,54 +120,42 @@ class ReliabilityHead(nn.Module):
         b, q, t, d = latent_bqtd.shape
 
         if q != self.num_aps:
-            raise ValueError(
-                f"Expected num_aps={self.num_aps}, got {q}"
-            )
+            raise ValueError(f"Expected num_aps={self.num_aps}, got {q}")
         if d != self.latent_dim:
-            raise ValueError(
-                f"Expected latent_dim={self.latent_dim}, got {d}"
-            )
+            raise ValueError(f"Expected latent_dim={self.latent_dim}, got {d}")
 
-        # Global block context
-        block_ctx = self.block_proj(embedding_be).view(b, 1, 1, d).expand(-1, q, t, -1)
+        block_ctx = self.block_proj(embedding_be).view(b, 1, 1, d)
+        block_ctx = block_ctx.expand(-1, q, t, -1)
 
-        # Time-wise AP context
-        time_ctx = latent_bqtd.mean(dim=2, keepdim=True).expand(-1, -1, t, -1)
-        latent_centered = latent_bqtd - time_ctx
+        ap_temporal_mean = latent_bqtd.mean(dim=2, keepdim=True)
+        temporal_centered = latent_bqtd - ap_temporal_mean
 
-        # Stronger AP competition statistics
-        ap_mean = latent_bqtd.mean(dim=1, keepdim=True).expand(-1, q, -1, -1)
-        ap_max = latent_bqtd.max(dim=1, keepdim=True).values.expand(-1, q, -1, -1)
+        cross_ap_mean = latent_bqtd.mean(dim=1, keepdim=True)
+        cross_ap_centered = latent_bqtd - cross_ap_mean
 
         feat = torch.cat(
             [
                 latent_bqtd,
-                latent_centered,
-                time_ctx,
+                temporal_centered,
+                cross_ap_centered,
                 block_ctx,
-                latent_bqtd - ap_mean,
-                latent_bqtd - ap_max,
             ],
             dim=-1,
-        )  # [B,Q,T,6D]
+        )  # [B,Q,T,4D]
 
         token = self.ap_token_proj(feat)  # [B,Q,T,H]
 
-        # Joint ranking per time step
-        token_btqh = token.permute(0, 2, 1, 3).contiguous()   # [B,T,Q,H]
-        bt = b * t
-        token_2d = token_btqh.view(bt, q, self.hidden_dim)    # [B*T,Q,H]
+        token_btqh = token.permute(0, 2, 1, 3).contiguous()
+        token_2d = token_btqh.view(b * t, q, self.hidden_dim)
 
-        # Mix APs jointly across the AP dimension
-        mixed = token_2d.transpose(1, 2).contiguous()         # [B*T,H,Q]
-        mixed = self.ap_mixer(mixed)                          # [B*T,H,Q]
-        mixed = mixed.transpose(1, 2).contiguous()            # [B*T,Q,H]
+        mixed = token_2d.transpose(1, 2).contiguous()
+        mixed = self.ap_mixer(mixed)
+        mixed = mixed.transpose(1, 2).contiguous()
 
-        # Residual refinement with global AP-set summary
-        ap_set_summary = mixed.mean(dim=1, keepdim=True)      # [B*T,1,H]
+        ap_set_summary = mixed.mean(dim=1, keepdim=True)
         refined = mixed + self.cross_ap_refine(mixed - ap_set_summary)
 
-        logits_btq = self.score_head(refined).squeeze(-1)     # [B*T,Q]
-        logits_btq = logits_btq.view(b, t, q).contiguous()    # [B,T,Q]
+        logits_btq = self.score_head(refined).squeeze(-1)
+        logits_btq = logits_btq.view(b, t, q).contiguous()
 
         return logits_btq
