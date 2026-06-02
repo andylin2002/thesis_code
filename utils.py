@@ -276,3 +276,50 @@ def get_history_coords_batch(
     history_coords[valid_mask] = coords_flat
     
     return history_coords
+
+def set_global_seed(seed: int) -> None:
+    import os
+    import random
+    import numpy as np
+    import torch
+
+    seed = int(seed)
+
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        # For older PyTorch versions that do not support warn_only.
+        # Do not force strict mode here, to avoid breaking unsupported operations.
+        pass
+    except Exception as e:
+        print(f"[Seed] Deterministic algorithm setting warning: {e}")
+
+    print(f"[Seed] Fixed random seed enabled: {seed}")
+
+
+def apply_reproducibility_config(config: dict) -> None:
+    fix_random_seed = bool(config.get("FIX_RANDOM_SEED", False))
+
+    if not fix_random_seed:
+        print("[Seed] FIX_RANDOM_SEED=False. Random seed is not fixed.")
+        return
+
+    if "RANDOM_SEED" not in config:
+        raise ValueError("FIX_RANDOM_SEED=True but RANDOM_SEED is not set in config.")
+
+    set_global_seed(int(config["RANDOM_SEED"]))

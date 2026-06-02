@@ -42,6 +42,7 @@ dataset.tar.gz
 *.ckpt
 output/*
 experiments/*
+ground_truth
 
 # Test
 analysis/

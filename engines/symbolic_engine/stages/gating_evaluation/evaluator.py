@@ -4,6 +4,7 @@ import os
 import torch
 from typing import Any, Dict, Tuple, Union
 
+import utils
 from engines.neural_engine.stages.represent import RepresentStage
 from core.models.model import NeuralReliabilityModel
 
@@ -20,6 +21,7 @@ class GatingEvaluator:
         self.num_subcarriers = int(config["CSI_DIMENSIONS"]["NUM_SUBCARRIERS"])
 
         self.represent = RepresentStage(config, device)
+        utils.apply_reproducibility_config(config)
         self.model = NeuralReliabilityModel(config).to(self.device)
         self._set_eval_mode()
         self._load_checkpoint_if_exists()

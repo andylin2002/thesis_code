@@ -32,6 +32,7 @@ class NeuralWorker(BaseWorker):
         self.ckpt_path = os.path.join(self.ckpt_dir, f"{self.scene_name}.ckpt")
 
     def _setup(self) -> None:
+        utils.apply_reproducibility_config(self.config)
         self.runtime = NeuralRuntime(self.config, self.device)
         self.runtime.setup()
         self.runtime.load_checkpoint(self.ckpt_path)

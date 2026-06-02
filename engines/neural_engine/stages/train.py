@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
+import utils
 from core.models.model import NeuralReliabilityModel
 
 
@@ -31,6 +32,7 @@ class TrainStage:
         self.teacher_std_floor = float(config.get("TEACHER_STD_FLOOR", 1e-4))
         self.eps = 1e-8
 
+        utils.apply_reproducibility_config(config)
         self.model = NeuralReliabilityModel(config).to(self.device)
         self.optimizer = optim.AdamW(
             self.model.parameters(),

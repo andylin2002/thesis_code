@@ -94,7 +94,7 @@ NEURAL_WINDOW_STRIDE: 4
 NEURAL_SEQUENCE_BUFFER_CAPACITY: 128
 
 ### --- Training Control --- ###
-NEURAL_UPDATES_PER_BATCH: 50
+NEURAL_UPDATES_PER_BATCH: 70
 
 ### --- Model Sync / Publishing --- ###
 NEURAL_PUBLISH_INTERVAL: 1
@@ -137,14 +137,14 @@ NEURAL_EMBED_HIDDEN: 64
 NEURAL_HEAD_HIDDEN: 64
 
 ### --- Regularization --- ###
-NEURAL_DROPOUT: 0.2
+NEURAL_DROPOUT: 0.5
 
 
 # ============================================================
 # 10. Optimization
 # ============================================================
 
-LEARNING_RATE: 0.002
+LEARNING_RATE: 0.008
 WEIGHT_DECAY: 0.0001
 GRADIENT_CLIP_NORM: 1.0
 
@@ -152,3 +152,10 @@ GRADIENT_CLIP_NORM: 1.0
 TEACHER_TEMPERATURE: 1.0
 STUDENT_TEMPERATURE: 1.0
 TEACHER_STD_FLOOR: 1e-4
+
+# ============================================================
+# 11. Random Seed
+# ============================================================
+
+FIX_RANDOM_SEED: true
+RANDOM_SEED: 7

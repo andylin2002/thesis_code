@@ -95,6 +95,9 @@ def main():
     if args.publish_interval is not None: config["NEURAL_PUBLISH_INTERVAL"] = args.publish_interval
     if args.min_updates_before_publish is not None: config["NEURAL_MIN_UPDATES_BEFORE_PUBLISH"] = args.min_updates_before_publish
 
+    # Apply reproducibility mode from config after the final config is constructed.
+    utils.apply_reproducibility_config(config)
+
     # Symbolic is always required; neural is optional
     enable_neural = config.get('ENABLE_NEURAL', True)
     
