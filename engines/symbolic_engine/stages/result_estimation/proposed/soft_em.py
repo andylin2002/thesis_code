@@ -53,8 +53,11 @@ class SoftEMAlgorithm:
         self.posterior_gt: Optional[torch.Tensor] = None
         self.reliability: Optional[torch.Tensor] = None
 
-        # Pre-calculate Parameters using in tof penalty calculation
         self.tof_params = self._calculate_tof_params()
+        self.log_pi_qtc = soft_em_utils.calculate_log_pi_qtc(
+            self.features,
+            self.tof_params,
+        )
 
     def initialize_params(self) -> TypePropParams:
         """
@@ -88,7 +91,7 @@ class SoftEMAlgorithm:
                 self.features,
                 self.propagation_params,
                 self.grid_angle_qg, 
-                self.tof_params
+                self.log_pi_qtc
             )
             emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)  # (G, T)
             
@@ -105,7 +108,8 @@ class SoftEMAlgorithm:
                 self.features,
                 self.propagation_params,
                 posterior_gt,
-                self.grid_angle_qg
+                self.grid_angle_qg, 
+                self.log_pi_qtc
             )
             
             self.propagation_params = new_params
@@ -113,6 +117,8 @@ class SoftEMAlgorithm:
             # 4. Check Convergence
             if self._check_parameter_convergence(old_params, new_params):
                 break
+
+        self._recompute_current_state()
 
     def _check_parameter_convergence(
         self, 
@@ -233,7 +239,7 @@ class SoftEMAlgorithm:
             self.features,
             self.propagation_params,
             self.grid_angle_qg,
-            self.tof_params
+            self.log_pi_qtc
         )
 
         emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)
@@ -242,4 +248,29 @@ class SoftEMAlgorithm:
             emission_log_probs_gt,
             self.neighbor_matrix,
             self.device
+        )
+
+    def _recompute_current_state(self) -> None:
+        """
+        Recompute emission and posterior using the current propagation parameters.
+        This must be called after the final accepted parameter update so that
+        the stored emission/posterior are consistent with self.propagation_params.
+        """
+        if self.propagation_params is None:
+            raise RuntimeError("Propagation parameters are not initialized.")
+
+        self.emission_log_probs_qgt = soft_em_utils.calculate_emission_log_probs(
+            self.config,
+            self.features,
+            self.propagation_params,
+            self.grid_angle_qg,
+            self.log_pi_qtc
+        )
+
+        emission_log_probs_gt = torch.sum(self.emission_log_probs_qgt, dim=0)
+
+        self.posterior_gt = soft_em_utils.run_forward_backward(
+            emission_log_probs_gt,
+            self.neighbor_matrix,
+            self.device,
         )

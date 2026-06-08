@@ -123,12 +123,33 @@ def calculate_grid_neighbor_delay_diff_qgk(
 # 2. Calculate Emission log Probability Distribution (EPD)
 # ==========================================
 
+def calculate_log_pi_qtc(
+    features: torch.Tensor,
+    tof_params: Dict[str, float],
+) -> torch.Tensor:
+    """
+    Compute fixed path-level log mixture weights log pi_{q,t,c}
+    from gain and ToF features.
+    """
+    obs_tof_cand = features[..., 2]
+    obs_tof_sprd = features[..., 3]
+    obs_gain_cand = features[..., 4]
+
+    log_rel_gain = _calculate_log_gain_reliability(obs_gain_cand)
+    log_rel_tof = _calculate_log_tof_reliability(
+        obs_tof_cand,
+        obs_tof_sprd,
+        tof_params,
+    )
+
+    return torch.log_softmax(log_rel_gain + log_rel_tof, dim=-1)
+
 def calculate_emission_log_probs(
     config: Dict[str, Any], 
     features: torch.Tensor,
     params: Dict[str, torch.Tensor],
     grid_angle_qg: torch.Tensor, 
-    tof_params: Dict[str, float]
+    log_pi_qtc: torch.Tensor
 ) -> torch.Tensor:
     """
     Calculates AoA-based emission log-probabilities.
@@ -139,24 +160,11 @@ def calculate_emission_log_probs(
     # 1. Feature Extraction & Weighting
     obs_aoa_cand = features[..., 0]
     obs_aoa_sprd = features[..., 1]
-    obs_tof_cand = features[..., 2]
-    obs_tof_sprd = features[..., 3]
-    obs_gain_cand = features[..., 4]
-
-    # Calculate Gain Penalty
-    gain_var_penalty = _calculate_gain_variance_penalty(obs_gain_cand)
-
-    # Calculate Independent Reliability
-    log_rel_gain = _calculate_log_gain_reliability(obs_gain_cand)
-    log_rel_tof = _calculate_log_tof_reliability(obs_tof_cand, obs_tof_sprd, tof_params)
-
-    log_path_scores = log_rel_gain + log_rel_tof
-    log_weights = torch.log_softmax(log_path_scores, dim=-1)
 
     # 2. Gaussian Parameters (Variance & Mean)
     # Variance dynamic adjustment
     bias_aoa = params['aoa_bias_q'].view(Q, 1, 1)
-    var_aoa = ((params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa) * gain_var_penalty).clamp(min=1e-6).unsqueeze(1)
+    var_aoa = (params['aoa_weight'] * (obs_aoa_sprd ** 2) + bias_aoa).clamp(min=1e-6).unsqueeze(1)
 
     # Mean vectors from grid
     mean_aoa = grid_angle_qg.view(Q, G, 1, 1) + params['aoa_offset_q'].view(Q, 1, 1, 1)
@@ -168,7 +176,7 @@ def calculate_emission_log_probs(
     # Mixture Integration (LogSumExp over Candidates)
     enable_tof_gain_weight = config.get("ENABLE_TOF_GAIN_WEIGHT", True)
     if enable_tof_gain_weight:
-        emission_log_probs_qgt = torch.logsumexp(log_prob_aoa + log_weights.unsqueeze(1), dim=-1)
+        emission_log_probs_qgt = torch.logsumexp(log_prob_aoa + log_pi_qtc.unsqueeze(1), dim=-1)
     else:
         emission_log_probs_qgt = torch.logsumexp(log_prob_aoa, dim=-1)
 
@@ -180,15 +188,6 @@ def _gaussian_log_pdf_angular(x, mean, var):
     # Map difference to [-180, 180]
     diff = torch.remainder(diff + 180.0, 360.0) - 180.0
     return -0.5 * (torch.log(2 * torch.pi * var) + diff**2 / var)
-
-def _gaussian_log_pdf_linear(x, mean, var):
-    """ Standard Gaussian Log PDF: -0.5*log(2pi*var) - (x-mu)^2/(2var) """
-    return -0.5 * (torch.log(2 * torch.pi * var) + (x - mean)**2 / var)
-
-def _calculate_gain_variance_penalty(obs_gain_cand: torch.Tensor) -> torch.Tensor:
-    max_gain, _ = torch.max(obs_gain_cand, dim=2, keepdim=True)
-    norm_gain = obs_gain_cand / (max_gain + 1e-9)
-    return 1.0 / (norm_gain + 0.1)
 
 def _calculate_log_gain_reliability(obs_gain_cand: torch.Tensor) -> torch.Tensor:
     """
@@ -287,171 +286,171 @@ def run_forward_backward(
 
 def update_soft_parameters(
     features: torch.Tensor,
-    old_params: Dict[str, torch.Tensor], 
-    stpd_gt: torch.Tensor, 
-    grid_angle_qg: torch.Tensor
+    old_params: Dict[str, torch.Tensor],
+    stpd_gt: torch.Tensor,
+    grid_angle_qg: torch.Tensor,
+    log_pi_qtc: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
     """
-    Update parameters based on Spatio-Temporal Probability Distribution (stpd).
-    """
-    # Hyperparameter
-    MIN_SCOPE_AOA, MIN_BIAS_AOA = 0.0, 1.0
+    Update calibration parameters using zeta-weighted M-step.
 
-    # Clone params to avoid in-place modification issues
-    new_params = {k: v.clone() for k, v in old_params.items()}
-    
-    # Dimensions
+    zeta_{q,g,t,c}
+        =
+        gamma_{g,t}
+        * pi_{q,t,c} p_{q,g,t,c}
+          / sum_j pi_{q,t,j} p_{q,g,t,j}
+    """
+    MIN_SCOPE_AOA = 0.0
+    MIN_BIAS_AOA = 1.0
+
     Q, T, C, _ = features.shape
     G = stpd_gt.shape[0]
 
-    # =========================================================================
-    # Part 0: Smart Candidate Selection
-    # Method: Select the candidate closest to Spatio-Temporal Probability Distribution's belief
-    # =========================================================================
-    best_features = _select_best_candidate(
-        features, old_params, stpd_gt, grid_angle_qg
-    ) # Returns [Q, T, 5]
-
-    # Extract Features
-    obs_aoa_main = best_features[..., 0]
-    obs_aoa_sprd = best_features[..., 1]
-
-    # =========================================================================
-    # Part 1: Update Offsets
-    # Method: Inverse-Variance Weighting
-    # =========================================================================
-
-    # Calculate Old Variance [Q, T]
-    aoa_var = old_params['aoa_weight'] * (obs_aoa_sprd ** 2) + old_params['aoa_bias_q'].unsqueeze(1)
-
-    # Clamp for stability [Q, T]
-    aoa_var = torch.clamp(aoa_var, min=1e-6)
-
-    # Calculate Offset Weights [Q, G, T]
-    weight_aoa_offset_qgt = stpd_gt.unsqueeze(0) / aoa_var.unsqueeze(1)
-
-    # Calculate Residuals (Obs - Geo) [Q, G, T]
-    diff_aoa = obs_aoa_main.unsqueeze(1) - grid_angle_qg.unsqueeze(2)
-    diff_aoa = torch.remainder(diff_aoa + 180.0, 360.0) - 180.0
-
-    # Update Offsets [Q]
-    raw_aoa_offset = torch.sum(weight_aoa_offset_qgt * diff_aoa, dim=(1, 2)) / (torch.sum(weight_aoa_offset_qgt, dim=(1, 2)) + 1e-9)
-    new_params['aoa_offset_q'] = raw_aoa_offset
-
-    # =========================================================================
-    # Part 2: Update Variance Parameters
-    # Method: Weighted Linear Regression
-    # =========================================================================
-
-    # Calculate Target Variance [Q, G, T]
-    sq_err_aoa = (diff_aoa - new_params['aoa_offset_q'].view(Q, 1, 1)) ** 2
-
-    # Prepare Regression Inputs
-    # 1. Weights [Q, G, T]
-    weights_reg = stpd_gt.unsqueeze(0).expand(Q, -1, -1)
-
-    # 2. Input [Q, G, T]
-    x_reg_aoa = (obs_aoa_sprd ** 2).unsqueeze(1).expand(-1, G, -1)
-
-    # Execute Regression
-    new_params['aoa_weight'], new_params['aoa_bias_q'] = (
-        _weighted_linear_regression(
-            x=x_reg_aoa, 
-            y=sq_err_aoa, 
-            w=weights_reg, 
-            min_slope=MIN_SCOPE_AOA, 
-            min_bias=MIN_BIAS_AOA
+    if grid_angle_qg.shape != (Q, G):
+        raise ValueError(
+            f"grid_angle_qg shape mismatch: expected {(Q, G)}, "
+            f"got {tuple(grid_angle_qg.shape)}"
         )
+
+    if stpd_gt.shape != (G, T):
+        raise ValueError(
+            f"stpd_gt shape mismatch: expected {(G, T)}, "
+            f"got {tuple(stpd_gt.shape)}"
+        )
+
+    if log_pi_qtc.shape != (Q, T, C):
+        raise ValueError(
+            f"log_pi_qtc shape mismatch: expected {(Q, T, C)}, "
+            f"got {tuple(log_pi_qtc.shape)}"
+        )
+
+    obs_aoa_cand = features[..., 0]   # (Q, T, C)
+    obs_aoa_sprd = features[..., 1]   # (Q, T, C)
+
+    # Current variance: sigma^2 = w * spread^2 + b_q
+    base_var_qtc = (
+        old_params["aoa_weight"] * (obs_aoa_sprd ** 2)
+        + old_params["aoa_bias_q"].view(Q, 1, 1)
     )
+    base_var_qtc = torch.clamp(base_var_qtc, min=1e-6)
+
+    # Current AoA likelihood p_{q,g,t,c}
+    mean_qg11 = (
+        grid_angle_qg.view(Q, G, 1, 1)
+        + old_params["aoa_offset_q"].view(Q, 1, 1, 1)
+    )
+
+    obs_q1tc = obs_aoa_cand.unsqueeze(1)       # (Q, 1, T, C)
+    var_q1tc = base_var_qtc.unsqueeze(1)       # (Q, 1, T, C)
+
+    diff_old_qgtc = obs_q1tc - mean_qg11
+    diff_old_qgtc = torch.remainder(diff_old_qgtc + 180.0, 360.0) - 180.0
+
+    log_p_qgtc = -0.5 * (
+        torch.log(2.0 * math.pi * var_q1tc)
+        + (diff_old_qgtc ** 2) / var_q1tc
+    )
+
+    # Candidate fraction:
+    # pi_{q,t,c} p_{q,g,t,c} / sum_j pi_{q,t,j} p_{q,g,t,j}
+    log_joint_qgtc = log_pi_qtc.unsqueeze(1) + log_p_qgtc
+    log_candidate_fraction_qgtc = log_joint_qgtc - torch.logsumexp(
+        log_joint_qgtc,
+        dim=-1,
+        keepdim=True,
+    )
+    candidate_fraction_qgtc = torch.exp(log_candidate_fraction_qgtc)
+
+    # Final M-step weight zeta_{q,g,t,c}
+    zeta_qgtc = (
+        stpd_gt.unsqueeze(0).unsqueeze(-1)
+        * candidate_fraction_qgtc
+    )
+
+    # Offset update
+    d_qgtc = obs_q1tc - grid_angle_qg.view(Q, G, 1, 1)
+    d_qgtc = torch.remainder(d_qgtc + 180.0, 360.0) - 180.0
+
+    offset_weight_qgtc = zeta_qgtc / torch.clamp(var_q1tc, min=1e-6)
+
+    d_rad_qgtc = torch.deg2rad(d_qgtc)
+
+    sin_sum_q = torch.sum(
+        offset_weight_qgtc * torch.sin(d_rad_qgtc),
+        dim=(1, 2, 3),
+    )
+    cos_sum_q = torch.sum(
+        offset_weight_qgtc * torch.cos(d_rad_qgtc),
+        dim=(1, 2, 3),
+    )
+
+    new_offset_q = torch.rad2deg(torch.atan2(sin_sum_q, cos_sum_q))
+
+    # Variance mapping update
+    residual_qgtc = d_qgtc - new_offset_q.view(Q, 1, 1, 1)
+    residual_qgtc = torch.remainder(residual_qgtc + 180.0, 360.0) - 180.0
+
+    x_reg_aoa = (obs_aoa_sprd ** 2).unsqueeze(1).expand(Q, G, T, C)
+    y_reg_aoa = residual_qgtc ** 2
+
+    new_weight, new_bias_q = _weighted_linear_regression(
+        x=x_reg_aoa,
+        y=y_reg_aoa,
+        w=zeta_qgtc,
+        min_slope=MIN_SCOPE_AOA,
+        min_bias=MIN_BIAS_AOA,
+    )
+
+    new_params = {k: v.clone() for k, v in old_params.items()}
+    new_params["aoa_offset_q"] = new_offset_q
+    new_params["aoa_weight"] = new_weight
+    new_params["aoa_bias_q"] = new_bias_q
 
     return new_params
 
-def _select_best_candidate(
-    features: torch.Tensor,
-    params: Dict[str, torch.Tensor],
-    stpd_gt: torch.Tensor,
-    grid_angle_qg: torch.Tensor
-) -> torch.Tensor:
-    """
-    Helper: Selects the candidate closest to the Expected Ground Truth.
-    """
-    Q, T, C, _ = features.shape
-    
-    # 1. Expected Ground Truth from STPD [Q, T]
-    # Norm STPD
-    stpd_sum_1t = torch.sum(stpd_gt, dim=0, keepdim=True) + 1e-9
-    stpd_norm_gt = stpd_gt / stpd_sum_1t
-
-    # Expected Angle (Cyclic Mean)
-    grid_angle_rad_qg = torch.deg2rad(grid_angle_qg)
-    sin_grid_qg = torch.sin(grid_angle_rad_qg)
-    cos_grid_qg = torch.cos(grid_angle_rad_qg)
-    exp_sin_qt = torch.matmul(sin_grid_qg, stpd_norm_gt)
-    exp_cos_qt = torch.matmul(cos_grid_qg, stpd_norm_gt)
-    exp_aoa_rad_qt = torch.atan2(exp_sin_qt, exp_cos_qt)
-    exp_aoa_qt = torch.rad2deg(exp_aoa_rad_qt)
-
-    # 2. Compare Candidates
-    # Offsets for comparison [Q, 1]
-    offset_aoa_q1 = params['aoa_offset_q'].unsqueeze(1)
-
-    best_idx = torch.zeros((Q, T), dtype=torch.long, device=features.device)
-    min_err = torch.full((Q, T), float('inf'), device=features.device)
-
-    # Precompute per-(Q,T) means with offsets
-    mu_aoa_qt = exp_aoa_qt + offset_aoa_q1  # (Q,T)
-
-    VAR_AOA_MIN = 1e-6    # deg^2
-
-    for c in range(C):
-        cand_aoa = features[:, :, c, 0]
-        sprd_aoa = features[:, :, c, 1]
-
-        diff = _angular_diff(cand_aoa, mu_aoa_qt)
-        var = params['aoa_weight'] * (sprd_aoa ** 2) + params['aoa_bias_q'].unsqueeze(1)
-        var = torch.clamp(var, min=VAR_AOA_MIN)
-
-        err = (diff ** 2) / var + torch.log(var)
-
-        mask = err < min_err
-        min_err[mask] = err[mask]
-        best_idx[mask] = c
-
-    gather_idx = best_idx.view(Q, T, 1, 1).expand(-1, -1, 1, 5)
-    return torch.gather(features, 2, gather_idx).squeeze(2)
-
-def _angular_diff(a, b):
-    """ Diff in range [-180, 180] """
-    d = a - b
-    return torch.remainder(d + 180.0, 360.0) - 180.0
-
 def _weighted_linear_regression(x, y, w, min_slope, min_bias):
     """
-    Solves w (Global) and b (Per-AP) using weighted least squares.
+    Solves the variance mapping parameters using weighted least squares.
+
+    This function is used by the zeta-weighted M-step, where all tensors
+    have shape (Q, G, T, C):
+
+        y ~= slope * x + bias_q
+
+    slope is shared across all APs, while bias_q is AP-wise.
     """
-    # Weighted Mean per AP (Q,)
-    sum_w = torch.sum(w, dim=(1, 2)) + 1e-9
-    mean_x = torch.sum(w * x, dim=(1, 2)) / sum_w
-    mean_y = torch.sum(w * y, dim=(1, 2)) / sum_w
-    
-    # Centering (Broadcast means)
-    # (Q, G, T) - (Q, 1, 1)
-    x_centered = x - mean_x.view(-1, 1, 1)
-    y_centered = y - mean_y.view(-1, 1, 1)
-    
-    # Global Slope (w)
-    # Sum over Q, G, T
+    if x.ndim != 4 or y.ndim != 4 or w.ndim != 4:
+        raise ValueError(
+            "_weighted_linear_regression expects 4D tensors with shape "
+            "(Q, G, T, C)."
+        )
+
+    if x.shape != y.shape or x.shape != w.shape:
+        raise ValueError(
+            f"Shape mismatch: x={tuple(x.shape)}, "
+            f"y={tuple(y.shape)}, w={tuple(w.shape)}"
+        )
+
+    # Weighted mean per AP: sum over G, T, C
+    sum_w = torch.sum(w, dim=(1, 2, 3)) + 1e-9
+    mean_x = torch.sum(w * x, dim=(1, 2, 3)) / sum_w
+    mean_y = torch.sum(w * y, dim=(1, 2, 3)) / sum_w
+
+    # Centered variables per AP
+    x_centered = x - mean_x.view(-1, 1, 1, 1)
+    y_centered = y - mean_y.view(-1, 1, 1, 1)
+
+    # Global slope shared across APs
     numerator = torch.sum(w * x_centered * y_centered)
     denominator = torch.sum(w * (x_centered ** 2)) + 1e-9
     w_slope = numerator / denominator
-    
-    # Constraint: Positive correlation
+
     w_slope = torch.clamp(w_slope.view(1), min=min_slope)
-    
-    # Local Intercept (b) per AP
+
+    # AP-wise intercept
     b_intercept = mean_y - w_slope * mean_x
     b_intercept = torch.clamp(b_intercept, min=min_bias)
-    
+
     return w_slope, b_intercept
 
 # ==========================================
