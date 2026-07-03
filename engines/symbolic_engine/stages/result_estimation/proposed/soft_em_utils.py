@@ -285,6 +285,7 @@ def run_forward_backward(
 # ==========================================
 
 def update_soft_parameters(
+    config: Dict[str, Any],
     features: torch.Tensor,
     old_params: Dict[str, torch.Tensor],
     stpd_gt: torch.Tensor,
@@ -353,7 +354,12 @@ def update_soft_parameters(
 
     # Candidate fraction:
     # pi_{q,t,c} p_{q,g,t,c} / sum_j pi_{q,t,j} p_{q,g,t,j}
-    log_joint_qgtc = log_pi_qtc.unsqueeze(1) + log_p_qgtc
+    enable_tof_gain_weight = config.get("ENABLE_TOF_GAIN_WEIGHT", True)
+    if enable_tof_gain_weight:
+        log_joint_qgtc = log_pi_qtc.unsqueeze(1) + log_p_qgtc
+    else:
+        log_joint_qgtc = log_p_qgtc  # uniform candidate weighting
+        
     log_candidate_fraction_qgtc = log_joint_qgtc - torch.logsumexp(
         log_joint_qgtc,
         dim=-1,

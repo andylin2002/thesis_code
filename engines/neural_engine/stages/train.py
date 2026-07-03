@@ -81,9 +81,13 @@ class TrainStage:
         teacher_logits, teacher_prob = self._build_teacher_prob_btq(target_score)
         student_log_prob = self._build_student_log_prob_btq(pred_logits)
 
+        # Flatten [B, T, Q] -> [B*T, Q], so batchmean divides by B*T.
+        student_log_prob_flat = student_log_prob.reshape(-1, student_log_prob.shape[-1])
+        teacher_prob_flat = teacher_prob.reshape(-1, teacher_prob.shape[-1])
+
         loss = F.kl_div(
-            student_log_prob,
-            teacher_prob,
+            student_log_prob_flat,
+            teacher_prob_flat,
             reduction="batchmean",
             log_target=False,
         )
@@ -213,8 +217,6 @@ class TrainStage:
         if target_score.device != self.device:
             target_score = target_score.to(self.device, non_blocking=True)
 
-        teacher_logits_btq, teacher_prob_btq = self._build_teacher_prob_btq(target_score)
-
         self.model.train()
         _, train_pred_logits_btq, train_embedding_be = self.model(
             pattern,
@@ -222,11 +224,9 @@ class TrainStage:
             return_embedding=True,
         )
 
-        proxy_loss = F.kl_div(
-            self._build_student_log_prob_btq(train_pred_logits_btq),
-            teacher_prob_btq,
-            reduction="batchmean",
-            log_target=False,
+        proxy_loss, teacher_logits_btq, teacher_prob_btq = self._compute_proxy_loss(
+            train_pred_logits_btq,
+            target_score,
         )
 
         total_loss = proxy_loss
@@ -244,7 +244,10 @@ class TrainStage:
 
         with torch.no_grad():
             train_pred_logits_btq = train_pred_logits_btq.detach()
-            train_pred_prob_btq = torch.softmax(train_pred_logits_btq, dim=-1)
+            train_pred_prob_btq = torch.softmax(
+                train_pred_logits_btq / self.student_temperature,
+                dim=-1,
+            )
             train_embedding_be = train_embedding_be.detach()
 
             self.model.eval()
@@ -254,7 +257,10 @@ class TrainStage:
                 return_embedding=True,
             )
             eval_pred_logits_btq = eval_pred_logits_btq.detach()
-            eval_pred_prob_btq = torch.softmax(eval_pred_logits_btq, dim=-1)
+            eval_pred_prob_btq = torch.softmax(
+                eval_pred_logits_btq / self.student_temperature,
+                dim=-1,
+            )
             eval_embedding_be = eval_embedding_be.detach()
 
             self.model.train()

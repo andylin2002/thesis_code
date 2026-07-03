@@ -105,6 +105,7 @@ class SoftEMAlgorithm:
             
             # 3. M-Step: Update Parameters using Soft Weights
             new_params = soft_em_utils.update_soft_parameters(
+                self.config,
                 self.features,
                 self.propagation_params,
                 posterior_gt,

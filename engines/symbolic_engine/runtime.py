@@ -68,7 +68,6 @@ class SymbolicRuntime:
             "posterior_gt": posterior_gt, 
             "reliability": reliability, 
             "features": features, # DEBUG
-            "aggregated_csi": aggregated_csi # DEBUG
         }
 
         # Convert to CPU-safe package

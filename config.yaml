@@ -88,7 +88,7 @@ ENABLE_TOF_GAIN_WEIGHT: True
 NEURAL_SLEEP: 0.05
 
 ### --- Sequence Construction --- ###
-NEURAL_BATCH_SIZE: 32
+NEURAL_BATCH_SIZE: 64
 NEURAL_WINDOW_SIZE: 16
 NEURAL_WINDOW_STRIDE: 4
 NEURAL_SEQUENCE_BUFFER_CAPACITY: 128
@@ -137,14 +137,14 @@ NEURAL_EMBED_HIDDEN: 64
 NEURAL_HEAD_HIDDEN: 64
 
 ### --- Regularization --- ###
-NEURAL_DROPOUT: 0.5
+NEURAL_DROPOUT: 0.1
 
 
 # ============================================================
 # 10. Optimization
 # ============================================================
 
-LEARNING_RATE: 0.008
+LEARNING_RATE: 0.002
 WEIGHT_DECAY: 0.0001
 GRADIENT_CLIP_NORM: 1.0
 
@@ -158,4 +158,4 @@ TEACHER_STD_FLOOR: 1e-4
 # ============================================================
 
 FIX_RANDOM_SEED: true
-RANDOM_SEED: 7
+RANDOM_SEED: 5
