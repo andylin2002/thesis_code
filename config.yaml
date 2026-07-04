@@ -7,7 +7,7 @@
 ### --- Method --- ###
 METHOD: 'PROPOSED' # Options: 'BASELINE' or 'PROPOSED'
 ENABLE_TRAJECTORY_DECODING: True
-ENABLE_NEURAL: True
+ENABLE_NEURAL: False
 
 EM_MAX_ITER: 100
 
@@ -24,7 +24,7 @@ ENV_CONFIG: "env_config.yaml"
 
 ### --- Trajectories (Paths) --- ###
 CSI_DATASETS:
-  - "NLoS_t150_ch36_ant3"
+  - "train_wander"
   # Options:
   # - "NLoS_t150_ch36_ant3"
   # - "NLoS_t799_ch36_ant3"

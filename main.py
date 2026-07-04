@@ -1,5 +1,6 @@
 # main.py
 
+import time
 import os
 import torch
 import argparse
@@ -213,11 +214,17 @@ def main():
             dataset_posterior = []
             dataset_reliability = []
             dataset_aggregated_csi = []
+            dataset_timing = []
 
             received_count = 0
+            dataset_start_time = time.perf_counter()
             while received_count < total_batches:
                 payload = queues["out"].get(timeout=None)
                 received_count += 1
+
+                timing = payload.get("timing")
+                if timing is not None:
+                    dataset_timing.append(timing)
 
                 trajectory = utils.to_numpy(payload.get("trajectory"))
                 if trajectory is not None:
@@ -245,6 +252,13 @@ def main():
 
             dataset_output_dir = os.path.join(output_dir, csi_dataset)
             os.makedirs(dataset_output_dir, exist_ok=True)
+
+            dataset_wall_time = time.perf_counter() - dataset_start_time   # <-- NEW
+            if dataset_timing:                                              # <-- NEW
+                utils.save_timing_report(
+                    dataset_timing, method=config.get("METHOD"), dataset_name=csi_dataset,
+                    output_dir=dataset_output_dir, wall_time_sec=dataset_wall_time, warmup=5,
+                )
 
             print(f"[System] Saving outputs to {dataset_output_dir}...")
 

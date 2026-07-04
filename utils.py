@@ -8,6 +8,44 @@ import torch
 import pandas as pd
 import os
 import re
+import json
+
+
+def save_timing_report(timing_list, method, dataset_name, output_dir, wall_time_sec=None, warmup=5):
+    """Summarize per-block timing dicts from SymbolicRuntime.step() into a JSON report."""
+    usable = timing_list[warmup:] if len(timing_list) > warmup else timing_list
+    if not usable:
+        return None
+
+    report = {
+        "method": method,
+        "dataset": dataset_name,
+        "num_blocks_total": len(timing_list),
+        "num_blocks_used": len(usable),
+        "warmup_dropped": len(timing_list) - len(usable),
+    }
+
+    for k in usable[0].keys():
+        vals = np.array([t[k] for t in usable], dtype=np.float64)
+        report[k] = {
+            "mean_ms": float(vals.mean()), "std_ms": float(vals.std()),
+            "median_ms": float(np.median(vals)), "p95_ms": float(np.percentile(vals, 95)),
+            "p99_ms": float(np.percentile(vals, 99)), "min_ms": float(vals.min()), "max_ms": float(vals.max()),
+        }
+
+    mean_total = report["total_ms"]["mean_ms"]
+    report["compute_throughput_blocks_per_sec"] = 1000.0 / mean_total if mean_total > 0 else None
+
+    if wall_time_sec:
+        report["observed_wall_time_sec"] = float(wall_time_sec)
+        report["observed_throughput_blocks_per_sec"] = len(timing_list) / wall_time_sec  # includes IPC/queue overhead
+
+    path = os.path.join(output_dir, "timing_report.json")
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"[Timing] {method}/{dataset_name}: mean={mean_total:.2f}ms p95={report['total_ms']['p95_ms']:.2f}ms "
+          f"throughput={report['compute_throughput_blocks_per_sec']:.2f} blocks/s -> {path}")
+    return report
 
 def to_numpy(data):
     """Helper: Convert Tensor/List to Numpy safely."""
