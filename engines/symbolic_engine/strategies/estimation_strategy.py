@@ -136,11 +136,11 @@ class ProposedEstimatorStrategy(IEstimator):
         # Get gating weight
         reliability: Optional[torch.Tensor] = None
 
-        if aggregated_csi is not None:
+        if aggregated_csi is not None and self.gating_evaluator.is_ready():
             try:
                 reliability = self.gating_evaluator.evaluate(aggregated_csi)
-
             except Exception as e:
+                reliability = None
                 print(f"[ProposedStrategy] AI Gating failed: {e}. Using pure physics.")
         
         # Instantiate the Proposed Estimator

@@ -7,7 +7,7 @@
 ### --- Method --- ###
 METHOD: 'PROPOSED' # Options: 'BASELINE' or 'PROPOSED'
 ENABLE_TRAJECTORY_DECODING: True
-ENABLE_NEURAL: False
+ENABLE_NEURAL_TRAINING: False
 
 EM_MAX_ITER: 100
 
@@ -78,6 +78,7 @@ NUM_PACKET: 1               # P (packets per sample)
 BASELINE_AOA_METHOD: 'mmp'   # 'music' or 'mmp'
 ENABLE_SOFT_EM: True
 ENABLE_TOF_GAIN_WEIGHT: True
+ENABLE_MULTIPATH: True
 
 
 # ============================================================
@@ -94,7 +95,7 @@ NEURAL_WINDOW_STRIDE: 4
 NEURAL_SEQUENCE_BUFFER_CAPACITY: 128
 
 ### --- Training Control --- ###
-NEURAL_UPDATES_PER_BATCH: 70
+NEURAL_UPDATES_PER_BATCH: 100
 
 ### --- Model Sync / Publishing --- ###
 NEURAL_PUBLISH_INTERVAL: 1
@@ -137,14 +138,14 @@ NEURAL_EMBED_HIDDEN: 64
 NEURAL_HEAD_HIDDEN: 64
 
 ### --- Regularization --- ###
-NEURAL_DROPOUT: 0.1
+NEURAL_DROPOUT: 0.2
 
 
 # ============================================================
 # 10. Optimization
 # ============================================================
 
-LEARNING_RATE: 0.002
+LEARNING_RATE: 0.004
 WEIGHT_DECAY: 0.0001
 GRADIENT_CLIP_NORM: 1.0
 
@@ -158,4 +159,4 @@ TEACHER_STD_FLOOR: 1e-4
 # ============================================================
 
 FIX_RANDOM_SEED: true
-RANDOM_SEED: 5
+RANDOM_SEED: 18

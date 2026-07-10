@@ -44,5 +44,4 @@ experiments/*
 ground_truth
 
 # Test
-analysis/
 *.sh

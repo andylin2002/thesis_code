@@ -1,0 +1,117 @@
+# ============================================================
+# Unified Analysis Configuration
+# ============================================================
+# Run with:
+#   python analysis/run_analysis.py
+# Choose one:
+#   symbolic_ablation | neural_param_search | neural_seed_search
+
+mode: symbolic_ablation
+
+project:
+  base_config_path: "config.yaml"
+  experiments_root: "experiments"
+  default_method: "PROPOSED"
+  checkpoint_name: "Office_8AP.ckpt"
+
+dataset:
+  train_datasets:
+    - "train_long"
+  target_datasets:
+    - "train_wander"
+  target_gt_paths: {}
+  use_symlink: true
+
+evaluation:
+  # One segment has 10 blocks. The timestamps per block are read from
+  # the main project config through NUM_SAMPLE * NUM_PACKET.
+  segment_blocks: 10
+  segment_stride: 10
+  include_last_partial_segment: false
+  score_metric: "overall_point_mean_error"
+
+symbolic:
+  run_name_prefix: "symbolic_ablation"
+  run_cases: ["all"]
+  controls:
+    soft_em_key: "ENABLE_SOFT_EM"
+    tof_gain_key: "ENABLE_TOF_GAIN_WEIGHT"
+    multipath_key: "ENABLE_MULTIPATH"
+    write_multipath_key_even_if_missing: true
+  cases:
+    ablation_111:
+      soft_em: true
+      tof_gain: true
+      multipath: true
+    ablation_011:
+      soft_em: false
+      tof_gain: true
+      multipath: true
+    ablation_101:
+      soft_em: true
+      tof_gain: false
+      multipath: true
+    ablation_110:
+      soft_em: true
+      tof_gain: true
+      multipath: false
+    ablation_100:
+      soft_em: true
+      tof_gain: false
+      multipath: false
+    ablation_010:
+      soft_em: false
+      tof_gain: true
+      multipath: false
+    ablation_001:
+      soft_em: false
+      tof_gain: false
+      multipath: true
+    ablation_000:
+      soft_em: false
+      tof_gain: false
+      multipath: false
+
+neural:
+  run_name_prefix_param_search: "neural_param_search"
+  run_name_prefix_seed_search: "neural_seed_search"
+
+  training:
+    enable_neural_training: true
+    enable_trajectory_decoding: false
+
+  validation:
+    enable_neural_training: false
+    enable_trajectory_decoding: true
+
+  fixed_common:
+    METHOD: "PROPOSED"
+    ENABLE_SOFT_EM: true
+    ENABLE_TOF_GAIN_WEIGHT: true
+    ENABLE_MULTIPATH: true
+    NEURAL_BATCH_SIZE: 64
+    NEURAL_SEQUENCE_BUFFER_CAPACITY: 128
+    WEIGHT_DECAY: 0.0001
+    GRADIENT_CLIP_NORM: 1.0
+    NEURAL_PUBLISH_INTERVAL: 1
+    NEURAL_MIN_UPDATES_BEFORE_PUBLISH: 1
+
+  param_search:
+    fixed_seed: null
+    max_runs: null
+    search_space:
+      NEURAL_WINDOW_SIZE: [12, 16]
+      NEURAL_WINDOW_STRIDE: [4]
+      NEURAL_UPDATES_PER_BATCH: [100]
+      NEURAL_DROPOUT: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+      LEARNING_RATE: [0.004]
+
+  seed_search:
+    seeds: [18]
+    repeats_per_seed: 1
+    fixed_hyperparameters:
+      NEURAL_WINDOW_SIZE: 16
+      NEURAL_WINDOW_STRIDE: 4
+      NEURAL_UPDATES_PER_BATCH: 100
+      NEURAL_DROPOUT: 0.2
+      LEARNING_RATE: 0.004

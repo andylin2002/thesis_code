@@ -24,30 +24,44 @@ class GatingEvaluator:
         utils.apply_reproducibility_config(config)
         self.model = NeuralReliabilityModel(config).to(self.device)
         self._set_eval_mode()
+
+        self.has_valid_weights = False
+        self.loaded_checkpoint_path = None
         self._load_checkpoint_if_exists()
 
     def _set_eval_mode(self) -> None:
         self.model.eval()
 
     def _load_checkpoint_if_exists(self) -> None:
-        ckpt_dir = "checkpoint"
+        ckpt_dir = self.config.get("CHECKPOINT_DIR", "checkpoint")
         scene_name = self.config.get("SCENARIO_NAME", "default_scene")
         ckpt_path = os.path.join(ckpt_dir, f"{scene_name}.ckpt")
 
         if not os.path.exists(ckpt_path):
             print(f"[GatingEvaluator] No checkpoint found at startup: {ckpt_path}")
+            self.has_valid_weights = False
+            self.loaded_checkpoint_path = None
             return
 
         try:
             checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=True)
             state_dict = checkpoint["state_dict"]
             model_state = state_dict.get("model", None)
+
             if model_state is None:
                 raise KeyError("Missing key 'model' in checkpoint['state_dict']")
+            
             self.model.load_state_dict(model_state, strict=True)
             self._set_eval_mode()
+
+            self.has_valid_weights = True
+            self.loaded_checkpoint_path = ckpt_path
+
             print(f"[GatingEvaluator] Loaded checkpoint at startup: {ckpt_path}")
+
         except Exception as e:
+            self.has_valid_weights = False
+            self.loaded_checkpoint_path = None
             print(f"[GatingEvaluator] Failed to load startup checkpoint: {e}")
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -61,7 +75,13 @@ class GatingEvaluator:
         self.model.load_state_dict(model_state, strict=True)
         self._set_eval_mode()
 
+        self.has_valid_weights = True
+        self.loaded_checkpoint_path = None
+
         print("[GatingEvaluator] Neural weights hot-swapped successfully.")
+
+    def is_ready(self) -> bool:
+        return self.has_valid_weights
 
     @torch.no_grad()
     def evaluate(

@@ -145,19 +145,24 @@ class MMPAlgorithm:
         cumulative_energy = torch.cumsum(S_squared, dim=1)
         normalized_cumulative_ratio = cumulative_energy / total_energy
 
-    ##### --- Choose Numbers of path ---
-        # shape: (batch, L(t,q))
-        L_mask = (normalized_cumulative_ratio >= threshold_ratio)
-        L_rank_indices = L_mask.int().argmax(dim=1) + 1
-        L_rank_indices = torch.clamp(L_rank_indices, min=1, max = col)
+    ##### --- Enable Multipath ---
+        enable_multipath = self.config['ENABLE_MULTIPATH']
+        if not enable_multipath:
+            L_multipath = 1
+        else:
+            # Choose Numbers of path
+            # shape: (batch, L(t,q))
+            L_mask = (normalized_cumulative_ratio >= threshold_ratio)
+            L_rank_indices = L_mask.int().argmax(dim=1) + 1
+            L_rank_indices = torch.clamp(L_rank_indices, min=1, max = col)
 
-        L_rank_float = L_rank_indices.float()
-        L_mean = L_rank_float.mean()
-        L_std = L_rank_float.std()
+            L_rank_float = L_rank_indices.float()
+            L_mean = L_rank_float.mean()
+            L_std = L_rank_float.std()
 
-        L_multipath_float = L_mean + 1.0 * L_std
-        L_multipath = math.ceil(L_multipath_float)
-        L_multipath = int(torch.clamp(torch.tensor(L_multipath), min=1, max=col).item())
+            L_multipath_float = L_mean + 1.0 * L_std
+            L_multipath = math.ceil(L_multipath_float)
+            L_multipath = int(torch.clamp(torch.tensor(L_multipath), min=1, max=col).item())
 
     ##### --- Get Us ---
         Us = U[:, :, :L_multipath]

@@ -38,7 +38,7 @@ def main():
 
     parser.add_argument("--method", type=str, default=None)
     parser.add_argument("--enable-trajectory-decoding", action="store_true", default=None)
-    parser.add_argument("--enable-neural", action="store_true", default=None)
+    parser.add_argument("--enable-neural-training", action="store_true", default=None)
 
     parser.add_argument("--csi-datasets", nargs="+", default=None)
 
@@ -75,7 +75,7 @@ def main():
     if args.em_max_iter is not None: config["EM_MAX_ITER"] = args.em_max_iter
 
     if args.method is not None: config["METHOD"] = args.method
-    if args.enable_neural: config["ENABLE_NEURAL"] = True
+    if args.enable_neural_training: config["ENABLE_NEURAL_TRAINING"] = True
     if args.enable_trajectory_decoding: config["ENABLE_TRAJECTORY_DECODING"] = True
 
     if args.csi_datasets is not None: config["CSI_DATASETS"] = args.csi_datasets
@@ -100,7 +100,7 @@ def main():
     utils.apply_reproducibility_config(config)
 
     # Symbolic is always required; neural is optional
-    enable_neural = config.get('ENABLE_NEURAL', True)
+    enable_neural_training = config.get('ENABLE_NEURAL_TRAINING', True)
     
     # Generate Reference Grid
     x_bounds = config.get("X_BOUNDS")
@@ -160,7 +160,7 @@ def main():
         directions_vectors=directions_vectors
     )
 
-    if enable_neural:
+    if enable_neural_training:
         neural_worker = NeuralWorker(
             name="NeuralWorker",
             config=config,
@@ -170,7 +170,7 @@ def main():
 
     # 7. Start Processes
     symbolic_worker.start()
-    if enable_neural:
+    if enable_neural_training:
         neural_worker.start()
 
     # 8. Main
@@ -200,7 +200,7 @@ def main():
             for block in csi_blocks:
                 queues["data_symbolic"].put(block.cpu())
 
-            if enable_neural:
+            if enable_neural_training:
                 queues["data_symbolic"].put({
                     "type": "end_of_sequence",
                     "source": csi_dataset,
@@ -247,7 +247,7 @@ def main():
                     dataset_aggregated_csi.append(aggregated_csi)
 
             queues["data_symbolic"].join()
-            if enable_neural:
+            if enable_neural_training:
                 queues["data_neural"].join()
 
             dataset_output_dir = os.path.join(output_dir, csi_dataset)
@@ -306,7 +306,7 @@ def main():
         
         symbolic_worker.join(timeout=2)
         if symbolic_worker.is_alive(): symbolic_worker.terminate()
-        if enable_neural:
+        if enable_neural_training:
             neural_worker.join(timeout=2)
             if neural_worker.is_alive(): neural_worker.terminate()
         
