@@ -18,7 +18,8 @@ dataset:
   train_datasets:
     - "train_long"
   target_datasets:
-    - "train_wander"
+    - "NLoS_t150_ch36_ant3"
+    #- "train_wander"
   target_gt_paths: {}
   use_symlink: true
 
@@ -43,34 +44,34 @@ symbolic:
       soft_em: true
       tof_gain: true
       multipath: true
-    ablation_011:
-      soft_em: false
-      tof_gain: true
-      multipath: true
-    ablation_101:
-      soft_em: true
-      tof_gain: false
-      multipath: true
-    ablation_110:
-      soft_em: true
-      tof_gain: true
-      multipath: false
-    ablation_100:
-      soft_em: true
-      tof_gain: false
-      multipath: false
-    ablation_010:
-      soft_em: false
-      tof_gain: true
-      multipath: false
-    ablation_001:
-      soft_em: false
-      tof_gain: false
-      multipath: true
-    ablation_000:
-      soft_em: false
-      tof_gain: false
-      multipath: false
+    # ablation_011:
+    #   soft_em: false
+    #   tof_gain: true
+    #   multipath: true
+    # ablation_101:
+    #   soft_em: true
+    #   tof_gain: false
+    #   multipath: true
+    # ablation_110:
+    #   soft_em: true
+    #   tof_gain: true
+    #   multipath: false
+    # ablation_100:
+    #   soft_em: true
+    #   tof_gain: false
+    #   multipath: false
+    # ablation_010:
+    #   soft_em: false
+    #   tof_gain: true
+    #   multipath: false
+    # ablation_001:
+    #   soft_em: false
+    #   tof_gain: false
+    #   multipath: true
+    # ablation_000:
+    #   soft_em: false
+    #   tof_gain: false
+    #   multipath: false
 
 neural:
   run_name_prefix_param_search: "neural_param_search"
@@ -100,14 +101,14 @@ neural:
     fixed_seed: null
     max_runs: null
     search_space:
-      NEURAL_WINDOW_SIZE: [12, 16]
+      NEURAL_WINDOW_SIZE: [16]
       NEURAL_WINDOW_STRIDE: [4]
       NEURAL_UPDATES_PER_BATCH: [100]
-      NEURAL_DROPOUT: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+      NEURAL_DROPOUT: [0.2]
       LEARNING_RATE: [0.004]
 
   seed_search:
-    seeds: [18]
+    seeds: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     repeats_per_seed: 1
     fixed_hyperparameters:
       NEURAL_WINDOW_SIZE: 16
