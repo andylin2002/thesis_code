@@ -9,8 +9,8 @@ The code supports baseline and proposed symbolic localization, pretrained AP rel
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/andylin2002/thesis_code.git
-cd thesis_code
+git clone https://github.com/andylin2002/Neuro--Symbolic_Wi-Fi_CSI_Indoor_Localization.git
+cd Neuro--Symbolic_Wi-Fi_CSI_Indoor_Localization
 ```
 
 ### 2. Set up Python
